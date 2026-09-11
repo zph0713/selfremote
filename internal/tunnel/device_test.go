@@ -19,7 +19,7 @@ func TestIfaceCommandsDarwin(t *testing.T) {
 
 	wantAdd := [][]string{
 		{"ifconfig", "utun5", "inet", "10.77.0.2", "10.77.0.2", "netmask", "255.255.255.0", "up"},
-		{"route", "-n", "add", "-net", "192.168.2.0/24", "-interface", "utun5"},
+		{"route", "-n", "add", "-net", "192.168.2.0", "-netmask", "255.255.255.0", "-interface", "utun5"},
 	}
 	if !reflect.DeepEqual(add, wantAdd) {
 		t.Fatalf("add commands:\n got %q\nwant %q", add, wantAdd)
@@ -49,6 +49,17 @@ func TestIfaceCommandsDarwin(t *testing.T) {
 	}
 	if got := add16[0][6]; got != "255.255.0.0" {
 		t.Fatalf("/16 netmask = %q, want 255.255.0.0", got)
+	}
+
+	// Route targets are normalized to network address + dotted netmask
+	// (the bare CIDR suffix is not valid on every macOS version).
+	add20, _, err := ifaceCommands("darwin", "utun5", "10.77.0.2/24", []string{"192.168.16.5/20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want20 := []string{"route", "-n", "add", "-net", "192.168.16.0", "-netmask", "255.255.240.0", "-interface", "utun5"}
+	if !reflect.DeepEqual(add20[1], want20) {
+		t.Fatalf("/20 route =\n got %q\nwant %q", add20[1], want20)
 	}
 }
 

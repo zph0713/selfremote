@@ -2,7 +2,14 @@
 
 自研远程接入隧道：让在外网的设备（Mac / 笔记本）直连**家庭内网的内网 IP** —— NAS、路由器、任意设备、任意端口。
 
-## 本版亮点（v0.2.0）
+## v0.2.1 修复
+
+- **macOS 客户端连接修复**：配置虚拟网卡的子网掩码格式错误（hex → 点分十进制），
+  此前在 Mac 上会报 `ifconfig: ffffff00: bad value` 而无法建立连接
+- macOS 路由注入改用全版本兼容的 `-net/-netmask` 语法
+- 「双击启动.command」与文档明确区分连接时的三个提示（sudo 登录密码 / 文件密码 / 动态码）
+
+## v0.2.0 亮点
 
 **🛡 Web 控制面（新）**：注册 / 登录（密码 + Google Authenticator 动态码）、设备密钥管理、实时总览。
 一套 `docker compose` 起全家桶：nginx + web + mariadb + 网关。

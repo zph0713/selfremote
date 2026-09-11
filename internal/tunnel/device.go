@@ -126,7 +126,20 @@ func ifaceCommands(goos, name, cidr string, routes []string) (add, del [][]strin
 		mask := net.IP(net.CIDRMask(p.Bits(), 32)).String()
 		add = append(add, []string{"ifconfig", name, "inet", ip, ip, "netmask", mask, "up"})
 		for _, r := range routes {
-			add = append(add, []string{"route", "-n", "add", "-net", r, "-interface", name})
+			pr, err := netip.ParsePrefix(r)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid route %q: %w", r, err)
+			}
+			// -net/-netmask with a network address is accepted by every macOS
+			// version (the bare CIDR suffix is not universally supported).
+			// Deletion is best-effort: bringing the interface down purges its
+			// routes anyway.
+			add = append(add, []string{
+				"route", "-n", "add",
+				"-net", pr.Masked().Addr().String(),
+				"-netmask", net.IP(net.CIDRMask(pr.Bits(), 32)).String(),
+				"-interface", name,
+			})
 			del = append(del, []string{"route", "-n", "delete", "-net", r})
 		}
 		del = append(del, []string{"ifconfig", name, "down"})
