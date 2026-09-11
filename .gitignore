@@ -1,0 +1,17 @@
+# build output
+/dist/
+/sr
+/sr.exe
+*.test
+*.out
+
+# local configs & keys — 绝不提交
+secrets/
+keys/
+*.local.json
+
+# editors / os
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
