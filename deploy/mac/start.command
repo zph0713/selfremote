@@ -26,9 +26,13 @@ fi
 
 chmod +x "$BIN" 2>/dev/null
 echo "== 芯片: $ARCH   程序: $BIN   配置: $CFG"
-echo "== 接下来会要求输入你的 Mac 密码（创建虚拟网卡需要管理员权限）"
 echo
-sudo "$BIN" client -c "$CFG"
+echo "== 接下来会依次出现三个提示（别搞混）："
+echo "   ① sudo  → 输【你的 Mac 登录密码】（系统权限；报 Sorry, try again 说明输错了，3 次会退出）"
+echo "   ② 程序  → 输【密钥文件密码】（生成密钥时你设的那个，至少 10 位）"
+echo "   ③ 程序  → 输【Google Authenticator 动态码】（6 位；服务端启用 MFA 时）"
+echo
+sudo -p "▶ ① 请输入【Mac 登录密码】: " "$BIN" client -c "$CFG"
 RC=$?
 echo
 echo "== 客户端已退出 (exit=$RC)"

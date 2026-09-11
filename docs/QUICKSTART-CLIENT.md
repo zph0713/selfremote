@@ -70,14 +70,20 @@
 > 直接双击会被 macOS 当文本打开，报「文本编码 Unicode（UTF-8）不适用」。
 
 **使用加密密钥文件（.srkey）时，把命令里的 `client.json` 换成 `client-你起的名字.srkey` 即可。**
-启动时会依次提示：`请输入文件密码`（不显示字符）→ `请输入 Google Authenticator 动态验证码`。
+
+> ⚠️ 会有 **三个** 密码类提示，千万别搞混：
+> 1. `Password:` —— **sudo 要的是你的 Mac 登录密码**（系统权限）。输错会报英文 `Sorry, try again`，
+>    连错 3 次命令直接退出（此时我们的程序还没启动）。
+> 2. `该密钥文件已加密，请输入文件密码:` —— **10 位密钥文件密码**（网页生成密钥时你自己设的）。
+> 3. `请输入 Google Authenticator 动态验证码:` —— **6 位动态码**（服务端启用 MFA 时）。
 
 **macOS：**
 
 ```sh
 chmod +x selfremote-macos-arm64
 xattr -d com.apple.quarantine selfremote-macos-arm64 2>/dev/null   # 去掉下载隔离标记
-sudo ./selfremote-macos-arm64 client -c client.json
+# 推荐用 -p 把 sudo 的提示文字改成中文，避免和文件密码混淆：
+sudo -p "▶ ① Mac 登录密码: " ./selfremote-macos-arm64 client -c client.json
 ```
 
 **Linux：**
@@ -111,6 +117,7 @@ curl -I http://192.168.1.50:5000    # 内网服务（按实际填）
 | 现象 | 处理 |
 |---|---|
 | `Operation not permitted` | 忘了 `sudo` |
+| 第一个提示处报 `Sorry, try again` | 那是 **sudo 在要 Mac 登录密码**（不是你设的文件密码/动态码）——输开机密码 |
 | macOS 提示"身份不明的开发者" | 系统设置 → 隐私与安全性 → "仍要打开" |
 | 一直重连 / 握手超时 | ① 服务端离线 ② 服务端地址变了 ③ 你所在网络没有 IPv6（用手机热点验证） |
 | `密码错误，请重试（1/3）` | 文件密码输错了（就是生成密钥时你设的那个 ≥10 位密码） |

@@ -100,6 +100,42 @@ func CreateTUN(mtu int) (Device, error) {
 	return &wgTun{dev: dev}, nil
 }
 
+// ifaceCommands builds the platform commands that configure (and tear down)
+// the tunnel interface. It is deliberately a pure function so every platform's
+// command plan can be unit-tested from any OS (the macOS path in particular
+// cannot be exercised from a Linux CI container).
+func ifaceCommands(goos, name, cidr string, routes []string) (add, del [][]string, err error) {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid tunnel_cidr %q: %w", cidr, err)
+	}
+	switch goos {
+	case "linux":
+		add = append(add, []string{"ip", "addr", "add", cidr, "dev", name})
+		add = append(add, []string{"ip", "link", "set", "dev", name, "up"})
+		for _, r := range routes {
+			add = append(add, []string{"ip", "route", "add", r, "dev", name})
+			del = append(del, []string{"ip", "route", "del", r, "dev", name})
+		}
+		del = append(del, []string{"ip", "addr", "del", cidr, "dev", name})
+	case "darwin":
+		ip := p.Addr().String()
+		// macOS ifconfig wants a dotted-quad netmask ("255.255.255.0").
+		// net.IPMask.String() returns hex ("ffffff00") which ifconfig rejects
+		// with "bad value" — use net.IP(mask).String() instead.
+		mask := net.IP(net.CIDRMask(p.Bits(), 32)).String()
+		add = append(add, []string{"ifconfig", name, "inet", ip, ip, "netmask", mask, "up"})
+		for _, r := range routes {
+			add = append(add, []string{"route", "-n", "add", "-net", r, "-interface", name})
+			del = append(del, []string{"route", "-n", "delete", "-net", r})
+		}
+		del = append(del, []string{"ifconfig", name, "down"})
+	default:
+		return nil, nil, fmt.Errorf("interface configuration not implemented on %s", goos)
+	}
+	return add, del, nil
+}
+
 // configureInterface assigns the tunnel address, brings the interface up and
 // adds the extra routes pointing at the device.
 func configureInterface(dev Device, cidr string, routes []string) error {
@@ -107,36 +143,14 @@ func configureInterface(dev Device, cidr string, routes []string) error {
 	if err != nil {
 		return fmt.Errorf("device name: %w", err)
 	}
-	p, err := netip.ParsePrefix(cidr)
+	add, _, err := ifaceCommands(runtime.GOOS, name, cidr, routes)
 	if err != nil {
-		return fmt.Errorf("invalid tunnel_cidr %q: %w", cidr, err)
+		return err
 	}
-	switch runtime.GOOS {
-	case "linux":
-		if out, err := run("ip", "addr", "add", cidr, "dev", name); err != nil {
-			return fmt.Errorf("ip addr add: %w (%s)", err, out)
+	for _, cmd := range add {
+		if out, err := run(cmd...); err != nil {
+			return fmt.Errorf("%s %s: %w (%s)", cmd[0], cmd[1], err, out)
 		}
-		if out, err := run("ip", "link", "set", "dev", name, "up"); err != nil {
-			return fmt.Errorf("ip link up: %w (%s)", err, out)
-		}
-		for _, r := range routes {
-			if out, err := run("ip", "route", "add", r, "dev", name); err != nil {
-				return fmt.Errorf("ip route add %s: %w (%s)", r, err, out)
-			}
-		}
-	case "darwin":
-		ip := p.Addr().String()
-		mask := net.IPMask(net.CIDRMask(p.Bits(), 32)).String()
-		if out, err := run("ifconfig", name, "inet", ip, ip, "netmask", mask, "up"); err != nil {
-			return fmt.Errorf("ifconfig: %w (%s)", err, out)
-		}
-		for _, r := range routes {
-			if out, err := run("route", "-n", "add", "-net", r, "-interface", name); err != nil {
-				return fmt.Errorf("route add %s: %w (%s)", r, err, out)
-			}
-		}
-	default:
-		return fmt.Errorf("interface configuration not implemented on %s", runtime.GOOS)
 	}
 	return nil
 }
@@ -147,17 +161,12 @@ func teardownInterface(dev Device, cidr string, routes []string) {
 	if err != nil {
 		return
 	}
-	switch runtime.GOOS {
-	case "linux":
-		for _, r := range routes {
-			run("ip", "route", "del", r, "dev", name)
-		}
-		run("ip", "addr", "del", cidr, "dev", name)
-	case "darwin":
-		for _, r := range routes {
-			run("route", "-n", "delete", "-net", r)
-		}
-		run("ifconfig", name, "down")
+	_, del, err := ifaceCommands(runtime.GOOS, name, cidr, routes)
+	if err != nil {
+		return
+	}
+	for _, cmd := range del {
+		run(cmd...)
 	}
 }
 
