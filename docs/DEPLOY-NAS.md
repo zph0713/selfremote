@@ -1,74 +1,104 @@
-# 群晖 NAS 部署（草稿，待 M1.1 联调验证）
+# 群晖 NAS 部署（Docker 容器）
 
-> 状态：**未验证** · 前置：Docker（Container Manager）、SSH 可用
+> 状态：**未验证**（M1.1 联调时执行）· 目标：DSM 7.2+（Container Manager）
 
-## 0. 前置检查
+## 0. 部署形态（已决策：docker-first）
 
-在 NAS 上执行：
+- 网关以 **Docker 容器**运行：`network_mode: host` + `NET_ADMIN` + `/dev/net/tun`
+- 容器化 ≠ 零主机改动：host 网络、IPv4 转发开关本质上要作用于 NAS 宿主网络栈——这是「内网 IP 直连」功能本身的要求（转发/NAT 规则必须生效在宿主的网络栈上），隧道类容器（WireGuard/Tailscale 的 NAS 版）都是这个形态
+- **Mac 客户端不容器化**：macOS 上 Docker 容器在 Linux 虚拟机内，碰不到宿主网络栈；utun 创建与路由注入必须由原生进程完成（见 docs/DESIGN.md 决策记录）
+- 未来 M2 的中继（relay）沿用同一镜像、同一容器套路
+
+## 1. 前置检查（NAS，SSH）
 
 ```sh
-uname -m                 # x86_64 → sr-linux-amd64；aarch64 → sr-linux-arm64
-ls -la /dev/net/tun      # 应存在，否则容器无法创建 tun 设备
-sudo iptables --version  # DSM7 多为 iptables (legacy)，确认可用
+uname -m                 # x86_64 → amd64 镜像；aarch64 → 需 arm64 镜像（重新构建）
+ls -la /dev/net/tun      # 应存在；没有则需确认内核 tun 模块
+iptables --version       # 看后端（legacy / nft）
 ```
 
-DSM 控制面板 → 安全性 → 防火墙（若开启）：放行 **UDP 28333**。
+DSM 控制面板 → 安全性 → 防火墙（若开启）：放行 **UDP 28333**（入站）。
+控制面板 → 终端机和 SNMP：开启 SSH（部署时用）。
 
-## 1. 构建
+## 2. 构建镜像（二选一）
 
-方式 A（推荐）：Windows 上交叉编译，把二进制拷到 NAS
+### 方式 A（推荐：不用从 Docker Hub 拉大镜像）
+
+在 Windows 开发机（项目根目录）：
 
 ```sh
 GOOS=linux GOARCH=amd64 go build -o dist/sr-linux-amd64 ./cmd/sr
+docker build -f deploy/nas/Dockerfile.prebuilt -t selfremote:latest .
+docker save selfremote:latest -o dist/selfremote-image.tar
 ```
 
-方式 B：NAS 上 `docker build`（deploy/nas/Dockerfile，多阶段构建）
+把 `dist/selfremote-image.tar` 传到 NAS（例如 File Station 上传到 `/volume1/docker/selfremote/`），然后：
 
-## 2. 运行
+```sh
+# NAS SSH
+cd /volume1/docker/selfremote
+docker load -i selfremote-image.tar
+```
+
+### 方式 B：NAS 上从源码构建（需要能访问 Docker Hub）
+
+```sh
+# 仓库源码放到 NAS 后（或 git clone）
+docker build -f deploy/nas/Dockerfile -t selfremote:latest .
+```
+
+## 3. 准备配置与启动
+
+目录结构（示例）：
+
+```
+/volume1/docker/selfremote/
+├── selfremote-image.tar      # 方式 A 的镜像
+├── docker-compose.yml        # 从 deploy/nas/ 复制
+└── config/
+    └── gateway.json
+```
+
+`gateway.json` 用 `sr genkey` 生成密钥后填写（见 docs/PROTOCOL.md 第 6 节）。
+
+启动（二选一）：
+
+- **Container Manager → 项目 → 新增**：选择 `docker-compose.yml` 所在目录，构建启动
+- **SSH**：`cd /volume1/docker/selfremote && docker compose up -d`
+
+备选（不用 compose 时）：
 
 ```sh
 docker run -d --name selfremote-gw \
   --restart unless-stopped \
   --network host \
-  --cap-add NET_ADMIN \
-  --device /dev/net/tun \
-  -v /volume1/docker/selfremote:/etc/selfremote \
+  --cap-add NET_ADMIN --cap-add NET_RAW \
+  --device /dev/net/tun:/dev/net/tun \
+  -v /volume1/docker/selfremote/config:/etc/selfremote \
   selfremote:latest gateway -c /etc/selfremote/gateway.json
 ```
 
-参数为什么必须这样：
+## 4. 转发开关（必须，二选一）
 
-- `--network host`：转发与 SNAT 规则要作用于宿主网络栈（容器与 NAS 共用一个网络命名空间）
-- `--cap-add NET_ADMIN`：创建 tun、写 iptables
-- `--device /dev/net/tun`：把宿主 tun 设备暴露给容器
+容器 entrypoint 会尽力设置 `net.ipv4.ip_forward=1`，但群晖宿主重启后**以开机任务为准**：
 
-## 3. 网络配置（由容器 entrypoint 自动执行，幂等）
+> DSM 控制面板 → 任务计划 → 新增 → 触发的任务 → **开机** → 用户 `root` →
+> 命令：`sysctl -w net.ipv4.ip_forward=1`
 
-```sh
-sysctl -w net.ipv4.ip_forward=1
+## 5. 验证
 
-# 出 LAN 口做源地址改写（接口名按实际：eth0 / ovs_eth0）
-iptables -t nat -C POSTROUTING -s 10.77.0.0/24 -o eth0 -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s 10.77.0.0/24 -o eth0 -j MASQUERADE
-
-# 转发放行
-iptables -C FORWARD -i sr0 -o eth0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i sr0 -o eth0 -j ACCEPT
-iptables -C FORWARD -i eth0 -o sr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
-iptables -A FORWARD -i eth0 -o sr0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-```
-
-## 4. 验证
-
-- NAS 本机：`ping -c3 10.77.0.2`
-- 在外的 Mac：连接后 `ping 192.168.1.x`（内网设备）、打开 `http://192.168.1.x:5000`
+- 容器日志：`docker logs selfremote-gw`（应看到 network setup 与 gateway 启动输出）
+- NAS 本机：`ping -c3 10.77.0.2`（客户端连上后）
+- 在外的 Mac：`ping 192.168.1.x`、打开 `http://192.168.1.x:5000`
 - 吞吐（可选）：`iperf3` 隧道内外对比
 
-## 5. 排查备忘
+## 6. 排查备忘
 
 | 现象 | 排查 |
 |---|---|
-| 容器内 iptables 报错 | DSM 的 iptables 版本/后端差异；确认 legacy vs nft |
-| 小包通、大文件卡死 | 典型 MTU 问题：确认客户端 MTU 1360；兜底加 TCP MSS clamp 规则 |
-| 内网设备不通但 NAS 通 | MASQUERADE 规则没生效 / 出接口名写错（ovs_eth0） |
-| 外部完全连不上 | DSM 防火墙未放行 UDP；或 DDNS 域名解析的 v6 不是 NAS 当前地址 |
-| 重启 NAS 后失效 | Docker `--restart unless-stopped` + entrypoint 幂等规则应能自愈；不一致时排查 |
+| 容器起不来，报 tun 错误 | `/dev/net/tun` 未映射或宿主无该设备 |
+| iptables 报错 | 换后端：compose 里设 `SR_IPT: iptables`（或 `iptables-legacy`）；DSM 内核多为 legacy |
+| 内网设备不通但 NAS 通 | `SR_LAN_IF` 写错（Open vSwitch 机型是 `ovs_eth0`）；或 ip_forward 未开 |
+| 小包通、大文件卡死 | 典型 MTU 问题：确认客户端 MTU 1360；必要时加 TCP MSS clamp |
+| 外部完全连不上 | DSM 防火墙未放行 UDP；DDNS 域名解析的 v6 不是 NAS 当前地址 |
+| 重启 NAS 后失效 | Docker `restart: unless-stopped` + entrypoint 幂等规则应能自愈；不一致时检查开机任务 |

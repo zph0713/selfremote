@@ -35,6 +35,6 @@ GOOS=darwin GOARCH=amd64 go build -o dist/sr-darwin-amd64 ./cmd/sr   # Mac (Inte
 cmd/sr/           CLI 入口（genkey / gateway / client）
 internal/tunnel/  协议核心：握手、会话、帧、UDP 传输、TUN 设备
 internal/config/  配置加载
-deploy/nas/       群晖部署（Dockerfile / compose / 说明）
+deploy/nas/       群晖部署（Dockerfile×2 / docker-compose.yml / entrypoint.sh）
 docs/             设计与部署文档
 ```

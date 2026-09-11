@@ -59,7 +59,7 @@ NAS 自身服务：经 `10.77.0.1` 或 LAN IP 均可访问（推荐前者，少�
 
 | 组件 | 运行位置 | 职责 |
 |---|---|---|
-| `sr gateway` | NAS / Docker | tun 设备、UDP6 监听、转发 + SNAT（entrypoint 自动配置） |
+| `sr gateway` | NAS / Docker（host 网络 + NET_ADMIN + /dev/net/tun） | tun 设备、UDP6 监听、转发 + SNAT（entrypoint 自动配置） |
 | `sr client` | Mac（root） | utun、路由注入、保活与重连 |
 | DDNS 域名 | 现成 | 解析到 NAS 的 IPv6，客户端连接目标 |
 
@@ -110,6 +110,7 @@ docs/             本目录
 | 3 | 自研深度 | 全自研隧道协议（帧、会话、握手编排）；密码学用成熟库 |
 | 4 | 语言 | Go（TUN/打洞/并发生态、跨平台交叉编译） |
 | 5 | 服务器 | MVP 不加公网服务器，纯 IPv6 直连；中转/打洞推迟到 M2 |
+| 6 | 部署形态 | docker-first：网关（及未来中继）全部容器化（host 网络 + NET_ADMIN + /dev/net/tun）；Mac 客户端必须原生运行（utun/路由需宿主权限，无法容器化） |
 
 ## 9. 待确认清单（部署前收集）
 

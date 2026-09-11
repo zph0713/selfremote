@@ -1,0 +1,16 @@
+# selfremote gateway — 薄镜像构建（从预编译二进制打包；推荐流程：Windows 交叉编译 → 本地打包 → docker save → NAS 导入）
+#
+# 构建（项目根目录执行）：
+#   GOOS=linux GOARCH=amd64 go build -o dist/sr-linux-amd64 ./cmd/sr
+#   docker build -f deploy/nas/Dockerfile.prebuilt -t selfremote:latest .
+#   docker save selfremote:latest -o dist/selfremote-image.tar
+FROM alpine:3
+
+RUN apk add --no-cache iptables iptables-legacy
+
+COPY dist/sr-linux-amd64 /usr/local/bin/sr
+COPY deploy/nas/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["gateway", "-c", "/etc/selfremote/gateway.json"]

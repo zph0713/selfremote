@@ -1,0 +1,41 @@
+# selfremote 网关（群晖 NAS 容器）
+#
+# 前提：DSM 7.2+ 的 Container Manager（或 SSH 下 docker compose）。
+# 使用步骤见 docs/DEPLOY-NAS.md：
+#   1) docker load -i selfremote-image.tar （或现场构建镜像）
+#   2) 准备 ./config/gateway.json
+#   3) Container Manager → 项目 → 新增（选本文件），或本目录执行 docker compose up -d
+
+services:
+  gateway:
+    image: selfremote:latest
+    container_name: selfremote-gw
+    restart: unless-stopped
+
+    # 必须 host 网络：转发/NAT 规则要作用于 NAS 宿主网络栈
+    network_mode: host
+
+    # 创建 tun 设备 + 写 iptables 所需的最小权限
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    volumes:
+      - ./config:/etc/selfremote
+
+    environment:
+      # 开启 Open vSwitch 的群晖（较新机型默认开启）改为 ovs_eth0
+      SR_LAN_IF: eth0
+      # SR_TUNNEL_CIDR: 10.77.0.0/24
+      # SR_IPT: iptables-legacy
+
+    command: ["gateway", "-c", "/etc/selfremote/gateway.json"]
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
