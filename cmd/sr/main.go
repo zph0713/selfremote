@@ -11,18 +11,22 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/flynn/noise"
 
 	"selfremote/internal/config"
+	"selfremote/internal/tunnel"
 )
 
-const version = "0.1.0-m1"
+const version = "0.2.0-m1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -90,9 +94,32 @@ func cmdGateway(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("gateway config loaded: listen=%s peers=%d tunnel=%s\n",
-		cfg.Listen, len(cfg.Peers), cfg.TunnelCIDR)
-	return fmt.Errorf("gateway runtime not implemented yet (milestone M1.1)")
+
+	peers := make([]tunnel.PeerConfig, 0, len(cfg.Peers))
+	for i, p := range cfg.Peers {
+		key := cfg.PeerKeys[i]
+		peers = append(peers, tunnel.PeerConfig{Name: p.Name, PublicKey: key[:]})
+	}
+	eng, err := tunnel.New(tunnel.Options{
+		Mode:       tunnel.ModeGateway,
+		PrivateKey: cfg.Private[:],
+		Listen:     cfg.Listen,
+		Peers:      peers,
+		TunnelCIDR: cfg.TunnelCIDR,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Printf("selfremote gateway\n")
+	fmt.Printf("  listen:     %s\n", eng.LocalAddr())
+	fmt.Printf("  public key: %s\n", base64.StdEncoding.EncodeToString(eng.PublicKey()))
+	fmt.Printf("  tunnel:     %s\n", cfg.TunnelCIDR)
+	fmt.Printf("  peers:      %d\n", len(peers))
+	return eng.Run(ctx)
 }
 
 func cmdClient(args []string) error {
@@ -108,7 +135,25 @@ func cmdClient(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("client config loaded: server=%s routes=%v tunnel=%s\n",
-		cfg.Server, cfg.Routes, cfg.TunnelCIDR)
-	return fmt.Errorf("client runtime not implemented yet (milestone M1.1)")
+
+	eng, err := tunnel.New(tunnel.Options{
+		Mode:         tunnel.ModeClient,
+		PrivateKey:   cfg.Private[:],
+		Server:       cfg.Server,
+		ServerPublic: cfg.ServerPublic[:],
+		TunnelCIDR:   cfg.TunnelCIDR,
+		Routes:       cfg.Routes,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Printf("selfremote client\n")
+	fmt.Printf("  server: %s\n", cfg.Server)
+	fmt.Printf("  tunnel: %s\n", cfg.TunnelCIDR)
+	fmt.Printf("  routes: %v\n", cfg.Routes)
+	return eng.Run(ctx)
 }
