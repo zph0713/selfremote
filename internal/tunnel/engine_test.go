@@ -132,7 +132,7 @@ func newTestEnv(t *testing.T, mut func(gw, cl *Options)) *testEnv {
 		Mode:          ModeClient,
 		PrivateKey:    clPriv,
 		ServerPublic:  gwPub,
-		TunnelCIDR:    "10.77.0.2/32",
+		TunnelCIDR:    "10.77.0.2/24",
 		Routes:        []string{"192.168.1.0/24"},
 		Device:        clDev,
 		SkipNetConfig: true,

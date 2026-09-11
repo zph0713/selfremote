@@ -48,7 +48,7 @@ type Client struct {
 	Server          string   `json:"server"` // host:port, e.g. "nas.example.com:28333"
 	PrivateKey      string   `json:"private_key"`
 	ServerPublicKey string   `json:"server_public_key"`
-	TunnelCIDR      string   `json:"tunnel_cidr"` // e.g. "10.77.0.2/32"
+	TunnelCIDR      string   `json:"tunnel_cidr"` // e.g. "10.77.0.2/24"
 	Routes          []string `json:"routes"`      // e.g. ["192.168.1.0/24"]
 
 	// Parsed on load.

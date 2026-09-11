@@ -75,7 +75,7 @@ type Options struct {
 	ServerPublic []byte // gateway static public key (32 bytes)
 
 	// Common.
-	TunnelCIDR string   // our address on the tunnel, e.g. "10.77.0.1/24" (gateway) or "10.77.0.2/32" (client)
+	TunnelCIDR string   // our address on the tunnel, e.g. "10.77.0.1/24" (gateway) or "10.77.0.2/24" (client)
 	Routes     []string // extra routes pointed at the tunnel (client: home LAN subnets)
 	MTU        int
 

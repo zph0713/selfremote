@@ -27,6 +27,12 @@ GOOS=darwin GOARCH=arm64 go build -o dist/sr-darwin-arm64 ./cmd/sr   # Mac (Appl
 GOOS=darwin GOARCH=amd64 go build -o dist/sr-darwin-amd64 ./cmd/sr   # Mac (Intel)
 ```
 
+Docker 端到端冒烟（真 TUN + 转发 + NAT，需本机有 Docker）：
+
+```sh
+bash scripts/e2e-docker.sh
+```
+
 > 注：Go module 路径暂为 `selfremote`，将来发布到 GitHub 时一并改名。
 
 ## 仓库结构
