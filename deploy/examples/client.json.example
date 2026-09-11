@@ -1,0 +1,7 @@
+{
+  "server": "[240e:xxxx:xxxx:xxxx::1]:28333",
+  "private_key": "<客户端私钥：selfremote genkey 输出的 private_key>",
+  "server_public_key": "<服务端公钥：服务端 genkey 输出的 public_key>",
+  "tunnel_cidr": "10.77.0.2/24",
+  "routes": ["192.168.1.0/24"]
+}

@@ -26,7 +26,7 @@ import (
 	"selfremote/internal/tunnel"
 )
 
-const version = "0.2.0-m1"
+const version = "0.1.0"
 
 func main() {
 	if len(os.Args) < 2 {

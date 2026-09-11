@@ -1,0 +1,8 @@
+{
+  "listen": "[::]:28333",
+  "private_key": "<服务端私钥：selfremote genkey 输出的 private_key>",
+  "tunnel_cidr": "10.77.0.1/24",
+  "peers": [
+    { "name": "my-mac", "public_key": "<客户端公钥：客户端 genkey 输出的 public_key>" }
+  ]
+}
