@@ -9,6 +9,12 @@
 secrets/
 keys/
 *.local.json
+*.key
+*.pem
+# 真实实例配置（示例见 docs/PROTOCOL.md）
+gateway.json
+client.json
+client-*.json
 
 # editors / os
 .DS_Store
