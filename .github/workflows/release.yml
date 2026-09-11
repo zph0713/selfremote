@@ -69,7 +69,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push multi-arch image
+      - name: Build & push multi-arch images (gateway + web)
         run: |
           set -euo pipefail
           IMG="ghcr.io/${GITHUB_REPOSITORY,,}"
@@ -79,18 +79,30 @@ jobs:
             -t "$IMG:${GITHUB_REF_NAME}" \
             -t "$IMG:latest" \
             --push .
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f deploy/stack/web.Dockerfile \
+            -t "$IMG-web:${GITHUB_REF_NAME}" \
+            -t "$IMG-web:latest" \
+            --push .
 
-      - name: Build amd64 image tar (for offline docker load)
+      - name: Build amd64 image tars (for offline docker load)
         run: |
           set -euo pipefail
           mkdir -p dist-image
           docker buildx build --platform linux/amd64 --load \
             -f deploy/nas/Dockerfile -t selfremote:release .
           docker save selfremote:release | gzip > dist-image/selfremote-image-linux-amd64.tar.gz
+          docker buildx build --platform linux/amd64 --load \
+            -f deploy/stack/web.Dockerfile -t selfremote-web:release .
+          docker save selfremote-web:release | gzip > dist-image/selfremote-web-image-linux-amd64.tar.gz
           ls -la dist-image
 
-      - name: Upload image tar to release
+      - name: Upload image tars to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" dist-image/selfremote-image-linux-amd64.tar.gz --clobber
+          gh release upload "$GITHUB_REF_NAME" \
+            dist-image/selfremote-image-linux-amd64.tar.gz \
+            dist-image/selfremote-web-image-linux-amd64.tar.gz \
+            --clobber

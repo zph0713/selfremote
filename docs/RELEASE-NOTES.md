@@ -2,63 +2,62 @@
 
 自研远程接入隧道：让在外网的设备（Mac / 笔记本）直连**家庭内网的内网 IP** —— NAS、路由器、任意设备、任意端口。
 
-本版本：M1.0 完成 —— 协议核心（Noise IK 握手、会话、显式 nonce 帧）+ 20 项测试 + Docker 端到端冒烟通过。
+## 本版亮点（v0.2.0）
 
----
+**🛡 Web 控制面（新）**：注册 / 登录（密码 + Google Authenticator 动态码）、设备密钥管理、实时总览。
+一套 `docker compose` 起全家桶：nginx + web + mariadb + 网关。
 
-## 🖥 服务端（网关）—— 部署在家里或任意 Docker 主机
+**🔐 动态码连接**：客户端连接时需要输入实时动态验证码（MFA 在加密隧道内验证，码不裸奔、防重放），
+用错 3 次自动锁定并断开。
 
-**方式 A：在线拉取（任意 Docker 主机）**
+**🧾 加密密钥文件（.srkey）**：客户端配置在网页上生成后即以「文件密码」加密下载
+（argon2id + ChaCha20-Poly1305）；运行时先解文件密码、再输动态码。服务器只保存公钥。
+
+**📊 连接状态**：连接后打印状态块（服务端主机、隧道、MFA 状态、流量），Ctrl+C 即刻断开并通知服务端。
+
+**♻️ 兼容**：纯命令行模式（不使用 Web 控制面、无 MFA）完全保留，见下方「服务端（命令行模式）」。
+
+## 下载
+
+| 我要… | 拿这个 |
+|---|---|
+| Mac 客户端 | `selfremote-macos-arm64`（Apple 芯片）/ `selfremote-macos-amd64`（Intel）/ `selfremote-macos.zip` 整包 |
+| Windows 客户端 | `selfremote-windows-amd64.exe` |
+| Linux 客户端 / 网关程序 | `selfremote-linux-amd64` / `selfremote-linux-arm64` |
+| 服务端镜像（在线） | `ghcr.io/zph0713/selfremote:latest`（网关）、`ghcr.io/zph0713/selfremote-web:latest`（控制面） |
+| 服务端镜像（离线） | `selfremote-image-linux-amd64.tar.gz`、`selfremote-web-image-linux-amd64.tar.gz`（`docker load -i`） |
+
+## 快速开始
+
+### 客户端（Mac）
+
+用 Web 控制面生成的 `client-*.srkey`：
 
 ```sh
-docker pull ghcr.io/zph0713/selfremote:latest
+sudo ./selfremote-macos-arm64 client -c client-yourname.srkey
+# 输入文件密码 → 输入 Google Authenticator 动态码 → 连上
+```
 
+（老式明文 `client.json` 同样支持；控制面未启用 MFA 时直接连接。）
+
+### 服务端（Web 控制面 · 推荐）
+
+```sh
+git clone https://github.com/zph0713/selfremote && cd selfremote/deploy/stack
+cp .env.example .env && vi .env        # 改数据库密码；可选 SERVER_ADDR / LAN_CIDRS
+bash init.sh                           # 生成网关密钥（一次）
+docker compose up -d                   # nginx + web + mariadb + gateway
+# 打开 http://<主机>:8080 → 注册管理员 → 绑定 Google Authenticator → 生成客户端密钥
+```
+
+### 服务端（命令行模式 · 无 Web 也可）
+
+```sh
 docker run -d --name selfremote-gw --restart unless-stopped \
-  --network host \
-  --cap-add NET_ADMIN --cap-add NET_RAW \
+  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
   --device /dev/net/tun:/dev/net/tun \
   -v /etc/selfremote:/etc/selfremote \
   ghcr.io/zph0713/selfremote:latest gateway -c /etc/selfremote/gateway.json
 ```
 
-> Docker Desktop（Windows/Mac）把 `--network host` 换成 `-p 28333:28333/udp`。
-> 国内网络拉取慢 → 用方式 B。
-
-**方式 B：离线镜像 tar（下载 `selfremote-image-linux-amd64.tar.gz`）**
-
-```sh
-docker load -i selfremote-image-linux-amd64.tar.gz
-# 然后按方式 A 的 docker run 使用（去掉 pull）
-```
-
-**方式 C：Linux 裸机**：直接下载 `selfremote-linux-amd64`（/`-arm64`）运行 `./selfremote-linux-amd64 gateway -c gateway.json`
-
-完整步骤（密钥生成、gateway.json、ip_forward/防火墙）：见仓库 `docs/QUICKSTART-SERVER.md`。
-
----
-
-## 💻 客户端（在外网的设备）
-
-| 平台 | 下载 |
-|---|---|
-| macOS Apple 芯片 | `selfremote-macos-arm64` |
-| macOS Intel | `selfremote-macos-amd64` |
-| macOS 整包（含说明+模板） | `selfremote-macos.zip` |
-| Windows / Linux | `selfremote-windows-amd64.exe` / `selfremote-linux-amd64` |
-
-```sh
-chmod +x selfremote-macos-arm64
-xattr -d com.apple.quarantine selfremote-macos-arm64 2>/dev/null   # macOS 去隔离标记
-sudo ./selfremote-macos-arm64 client -c client.json
-```
-
-看到 `client: session established` 即连接成功；Ctrl+C 退出并自动清理路由。
-完整步骤（密钥交换、配置、验证）：见仓库 `docs/QUICKSTART-CLIENT.md`。
-
----
-
-## 一分钟理解
-
-- **服务端**监听 UDP，另一端把隧道流量转发进内网（SNAT）——谁连上隧道，就"坐进"了家里内网；
-- **客户端**只把家里内网网段（如 `192.168.1.0/24`）的流量送进隧道，其余上网流量不受影响；
-- 端到端加密（Noise IK + ChaCha20-Poly1305），服务端用公钥白名单授权，未授权握手静默丢弃。
+文档：仓库 `docs/` 目录（QUICKSTART-WEB / QUICKSTART-CLIENT / QUICKSTART-SERVER / DEPLOY-NAS / PROTOCOL）。

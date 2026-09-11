@@ -1,0 +1,9 @@
+{{define "content"}}
+<h1>MFA 已启用 ✅</h1>
+<div class="card">
+  <p><b>请立即保存以下恢复码</b>（共 10 个，每个只能用一次）：手机丢失或重装 App 时用它登录。
+     离开本页后将无法再次查看。</p>
+  <div class="codes">{{range .Data.Codes}}<code>{{.}}</code>{{end}}</div>
+  <a class="btn" href="/devices">前往客户端密钥页 →</a>
+</div>
+{{end}}

@@ -1,0 +1,71 @@
+# selfremote 全家桶：nginx（反代）+ web（控制面）+ mariadb + gateway（隧道网关）
+#
+# 用法（Linux NAS / 任意 Docker 主机）：
+#   1. cp .env.example .env && vi .env        # 改数据库密码、数据目录等
+#   2. bash init.sh                           # 生成网关密钥与 gateway.json（幂等，只需一次）
+#   3. docker compose up -d
+#   4. 浏览器打开 http://<主机>:8080 → 注册管理员 → 绑定 Google Authenticator
+#
+# Docker Desktop（Windows/macOS 本机试验）：加 -f docker-compose.desktop.yml
+#   （桌面版的 host 网络是虚拟机 netns，必须换成桥接 + 发布端口）
+name: selfremote
+
+services:
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?请在 .env 设置 DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: selfremote
+      MARIADB_USER: sr
+      MARIADB_PASSWORD: ${DB_PASSWORD:?请在 .env 设置 DB_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  web:
+    image: ${SR_WEB_IMAGE:-ghcr.io/zph0713/selfremote-web:latest}
+    restart: unless-stopped
+    environment:
+      DB_DSN: "sr:${DB_PASSWORD}@tcp(db:3306)/selfremote?parseTime=true&charset=utf8mb4"
+      DATA_DIR: /data
+      LISTEN: ":8080"
+      SERVER_ADDR: ${SERVER_ADDR:-}
+      LAN_CIDRS: ${LAN_CIDRS:-192.168.1.0/24}
+      TUNNEL_PORT: ${TUNNEL_PORT:-28333}
+    volumes:
+      - ${SR_CONFIG_DIR:-./data}:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - web
+
+  gateway:
+    image: ${SR_IMAGE:-ghcr.io/zph0713/selfremote:latest}
+    restart: unless-stopped
+    network_mode: host
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      SR_LAN_IF: ${SR_LAN_IF:-eth0}
+      SR_TUNNEL_CIDR: ${SR_TUNNEL_CIDR:-10.77.0.0/24}
+    volumes:
+      - ${SR_CONFIG_DIR:-./data}:/etc/selfremote
+    command: ["gateway", "-c", "/etc/selfremote/gateway.json"]
+
+volumes:
+  db-data:

@@ -1,0 +1,34 @@
+{{define "content"}}
+<h1>客户端密钥</h1>
+<p><a class="btn" href="/devices/new">＋ 生成新客户端密钥</a></p>
+{{if .Data.Devices}}
+<table>
+  <tr>
+    <th>名称</th>
+    {{if .Data.IsAdmin}}<th>用户</th>{{end}}
+    <th>公钥</th><th>状态</th><th>创建时间</th><th></th>
+  </tr>
+  {{range .Data.Devices}}
+  <tr>
+    <td>{{.Name}}</td>
+    {{if $.Data.IsAdmin}}<td>{{.Username}}</td>{{end}}
+    <td class="mono">{{.PublicKey}}</td>
+    <td>{{if index $.Data.Online .Name}}<span class="dot ok"></span>在线{{else}}<span class="muted">离线</span>{{end}}</td>
+    <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+    <td>
+      <form method="post" action="/devices/revoke" class="inline"
+            onsubmit="return confirm('确定吊销该密钥？在线连接会在数秒内被断开。')">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button class="danger">吊销</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p class="muted">还没有客户端密钥。点上面的按钮生成一个。</p>
+{{end}}
+<p class="muted small">服务器只保存公钥；私钥只存在于你下载的 <code>.srkey</code> 文件里（受文件密码加密保护）。
+   吊销后该设备立即失去连接资格，重新使用需再生成或重新导入。</p>
+{{end}}

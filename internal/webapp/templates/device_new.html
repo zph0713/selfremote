@@ -1,0 +1,53 @@
+{{define "content"}}
+<h1>生成客户端密钥</h1>
+{{if .Data.Problems}}
+<div class="flash err">
+  <b>暂时无法生成：</b>
+  <ul>{{range .Data.Problems}}<li>{{.}}</li>{{end}}</ul>
+</div>
+{{end}}
+<div class="grid">
+  <div class="card">
+    <h2>① 生成新密钥（推荐）</h2>
+    <form method="post" action="/devices/new">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label>设备名称（如 mac-air）
+        <input name="name" required maxlength="64" placeholder="mac-air">
+      </label>
+      <label>密钥文件密码（至少 10 位；在 Mac 上运行时需要输入它）
+        <input type="password" name="passphrase" required minlength="10">
+      </label>
+      <label>再输一次
+        <input type="password" name="confirm" required minlength="10">
+      </label>
+      <p class="muted small">将下载 <code>client-设备名.srkey</code>（加密文件，含该设备专属密钥）。
+         <b>服务器不保存私钥，也保存不了文件密码——忘记了只能重新生成。</b></p>
+      <button type="submit" {{if .Data.Problems}}disabled{{end}}>生成并下载</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>② 导入已有公钥</h2>
+    <form method="post" action="/devices/import">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label>设备名称
+        <input name="name" required maxlength="64">
+      </label>
+      <label>公钥（旧设备原有配置里的 public_key / sr genkey 输出）
+        <input name="public_key" required placeholder="base64…">
+      </label>
+      <p class="muted small">适合把已经配好的设备直接迁移进来：不换密钥，只登记公钥。
+         连接时同样需要动态码（MFA 由账号层面控制）。</p>
+      <button type="submit" {{if .Data.Problems}}disabled{{end}}>导入</button>
+    </form>
+  </div>
+</div>
+<div class="card">
+  <h2>写入密钥文件的配置内容</h2>
+  <table class="kv">
+    <tr><td>服务端地址</td><td class="mono">{{if .Data.Server}}{{.Data.Server}}{{else}}（未就绪）{{end}}</td></tr>
+    <tr><td>走隧道的网段</td><td class="mono">{{.Data.Routes}}</td></tr>
+  </table>
+  <p class="muted small">如需修改（例如换了公网地址或网段），生成后也可用文本方式解不开——
+     直接重新生成一个即可（旧的在列表里吊销）。</p>
+</div>
+{{end}}

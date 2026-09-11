@@ -1,0 +1,7 @@
+{{define "content"}}
+<div class="card narrow">
+  <h1>出错了</h1>
+  <p class="muted">{{if .Error}}{{.Error}}{{else}}请求无法完成。{{end}}</p>
+  <p><a class="btn" href="/">返回首页</a></p>
+</div>
+{{end}}

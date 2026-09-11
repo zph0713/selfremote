@@ -1,0 +1,12 @@
+# Docker Desktop 测试覆盖文件：网关从 host 网络切到桥接并发布 UDP 端口
+# （Docker Desktop 的 host 网络 = 虚拟机 netns，外部入站与发布端口都会失效）
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d
+services:
+  gateway:
+    network_mode: bridge
+    ports:
+      - "${TUNNEL_PORT:-28333}:${TUNNEL_PORT:-28333}/udp"
+    sysctls:
+      - net.ipv4.ip_forward=1

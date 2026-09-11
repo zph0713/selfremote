@@ -1,0 +1,48 @@
+{{define "content"}}
+<h1>账号设置</h1>
+<div class="card">
+  <h2>账号</h2>
+  <table class="kv">
+    <tr><td>用户名</td><td>{{.User.Username}}</td></tr>
+    <tr><td>角色</td><td>{{if .User.IsAdmin}}管理员{{else}}成员{{end}}</td></tr>
+    <tr><td>两步验证</td>
+      <td>{{if .Data.Enabled}}<span class="dot ok"></span>已启用（Google Authenticator）
+          {{else if .Data.Pending}}<span class="dot warn"></span>待完成绑定
+          {{else}}<span class="dot warn"></span>未启用{{end}}</td></tr>
+  </table>
+</div>
+
+{{if .Data.Enabled}}
+<p class="muted">登录时需要输入 App 中的 6 位动态码（或使用绑定时展示过的恢复码）。
+   如需换手机：重新走一次「开始绑定」流程即可。</p>
+<form method="post" action="/settings/mfa/begin">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button>重新绑定（旧 App 条目将失效）</button>
+</form>
+
+{{else if .Data.Pending}}
+<div class="card">
+  <h2>绑定 Google Authenticator</h2>
+  <ol>
+    <li>打开手机上的 Google Authenticator（或任意 TOTP App），选择「扫描二维码」</li>
+    <li>扫描下方二维码；手输时密钥为 <code>{{.User.TOTPSecret}}</code></li>
+    <li>把 App 里显示的数字填入下面完成绑定</li>
+  </ol>
+  <img class="qr" src="/settings/mfa/qr" alt="TOTP 二维码" width="240" height="240">
+  <form method="post" action="/settings/mfa/confirm">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>App 中显示的 6 位验证码
+      <input name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>
+    </label>
+    <button type="submit">完成绑定</button>
+  </form>
+</div>
+
+{{else}}
+<div class="flash warn">未绑定两步验证前，客户端密钥功能不可用。</div>
+<form method="post" action="/settings/mfa/begin">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit">开始绑定 Google Authenticator</button>
+</form>
+{{end}}
+{{end}}

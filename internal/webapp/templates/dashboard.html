@@ -1,0 +1,72 @@
+{{define "content"}}
+<h1>总览</h1>
+<div class="grid">
+  <div class="card">
+    <h2>服务端</h2>
+    <table class="kv">
+      <tr><td>主机名</td><td>{{if .Data.Net.Hostname}}{{.Data.Net.Hostname}}{{else}}<span class="muted">等待网关上报…</span>{{end}}</td></tr>
+      <tr><td>隧道监听</td><td class="mono">{{.Data.Status.Listen}}</td></tr>
+      <tr><td>客户端接入地址</td><td class="mono">{{if .Data.ServerAddr}}{{.Data.ServerAddr}}{{else}}<span class="muted">未就绪</span>{{end}}</td></tr>
+      <tr><td>状态更新时间</td><td>{{if .Data.StatusAge}}{{.Data.StatusAge}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h2>连接概况</h2>
+    <table class="kv">
+      <tr><td>我的密钥数</td><td>{{.Data.Devices}}</td></tr>
+      <tr><td>网关白名单总数</td><td>{{.Data.Status.Totals.Registered}}</td></tr>
+      <tr><td>当前在线</td><td>{{.Data.Status.Totals.Online}}</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>网络接口（服务所在机器）{{if .Data.NetAge}}<span class="muted small"> · 更新于 {{.Data.NetAge}}</span>{{end}}</h2>
+  {{if .Data.Net.Interfaces}}
+  <table>
+    <tr><th>接口</th><th>状态</th><th>地址</th></tr>
+    {{range .Data.Net.Interfaces}}
+    <tr>
+      <td class="mono">{{.Name}}</td>
+      <td>{{if .Up}}<span class="dot ok"></span>up{{else}}<span class="dot warn"></span>down{{end}}</td>
+      <td class="mono">{{range .Addresses}}<div>{{.}}</div>{{end}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<p class="muted">等待网关上报网络信息…</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>当前连接</h2>
+  {{if .Data.Status.Peers}}
+  <table>
+    <tr><th>设备</th><th>用户</th><th>来源</th><th>MFA</th><th>连接时长</th><th>流量 ↑ / ↓</th><th>最近活动</th></tr>
+    {{range .Data.Status.Peers}}
+    <tr>
+      <td>{{.Name}}</td>
+      <td>{{.User}}</td>
+      <td class="mono">{{.Remote}}</td>
+      <td>{{if .Authed}}<span class="dot ok"></span>已通过{{else}}<span class="dot warn"></span>待验证{{end}}</td>
+      <td>{{if .Connected}}{{since .Since}}（自 {{.Since}}）{{else}}离线{{end}}</td>
+      <td>{{human_bytes .Tx}} / {{human_bytes .Rx}}</td>
+      <td>{{since .LastRecv}}</td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<p class="muted">暂无已登记的客户端。</p>{{end}}
+</div>
+
+<div class="card">
+  <h2>下载与部署</h2>
+  <p>客户端程序（Mac / Windows / Linux）：<a href="https://github.com/zph0713/selfremote/releases" target="_blank" rel="noreferrer">GitHub Releases</a>
+     —— 配合本页「客户端密钥」中生成的 <code>.srkey</code> 文件使用。</p>
+  <p>服务端镜像：<code>ghcr.io/zph0713/selfremote:latest</code>（离线镜像包、部署文档同在 Releases 页）。</p>
+  <p>在任意 Docker 主机部署服务端：</p>
+  <pre><code>docker pull ghcr.io/zph0713/selfremote:latest
+docker run -d --name selfremote-gw --restart unless-stopped \
+  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
+  --device /dev/net/tun:/dev/net/tun \
+  -v /etc/selfremote:/etc/selfremote \
+  ghcr.io/zph0713/selfremote:latest gateway -c /etc/selfremote/gateway.json</code></pre>
+</div>
+{{end}}

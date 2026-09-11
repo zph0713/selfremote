@@ -1,0 +1,20 @@
+{{define "content"}}
+<div class="card narrow">
+  <h1>登录</h1>
+  {{if .Data.NeedSetup}}
+  <p class="muted">还没有账号：请先 <a href="/register">创建管理员账号</a>。</p>
+  {{end}}
+  <form method="post" action="/login">
+    <label>用户名
+      <input name="username" autocomplete="username" autofocus required>
+    </label>
+    <label>密码
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <label>动态验证码（已绑定 Google Authenticator 时必填，也可输入恢复码）
+      <input name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
+    </label>
+    <button type="submit">登录</button>
+  </form>
+</div>
+{{end}}

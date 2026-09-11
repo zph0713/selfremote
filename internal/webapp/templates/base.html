@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · selfremote</title>
+{{if .AutoRefresh}}<meta http-equiv="refresh" content="10">{{end}}
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand"><a href="/">selfremote <span class="ver">v{{v}}</span></a></div>
+  {{if .User}}
+  <nav>
+    <a href="/">总览</a>
+    <a href="/devices">客户端密钥</a>
+    {{if .User.IsAdmin}}<a href="/users">用户</a>{{end}}
+    <a href="/settings">设置</a>
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="linklike">退出（{{.User.Username}}）</button>
+    </form>
+  </nav>
+  {{end}}
+</header>
+<main>
+{{if .Flash}}<div class="flash ok">{{.Flash}}</div>{{end}}
+{{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
+{{template "content" .}}
+</main>
+<footer>selfremote 控制面 · v{{v}} · 数据仅保存在本机数据库</footer>
+</body>
+</html>
