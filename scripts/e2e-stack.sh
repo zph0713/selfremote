@@ -20,6 +20,9 @@ IMG=selfremote:e2e-stack
 WEBIMG=selfremote-web:e2e-stack
 WORK="$ROOT/dist/stack-e2e"
 WORKN="$(cygpath -m "$WORK" 2>/dev/null || echo "$WORK")"   # native path for docker/curl
+# curl.exe 在 git-bash 下写 /dev/null 会报 write error（exit 23），Windows 用 NUL
+DEVNULL=/dev/null
+if uname -s 2>/dev/null | grep -qiE 'msys|mingw|cygwin'; then DEVNULL=NUL; fi
 BASE="http://127.0.0.1:$HTTP_PORT"
 JAR="$WORKN/cookies.txt"
 DBPW="app-$RANDOM"
@@ -30,7 +33,10 @@ say() { echo; echo "== $*"; }
 
 say "[0] 清理旧环境"
 docker rm -f sr-stack-cl sr-stack-lan >/dev/null 2>&1 || true
-docker compose -p "$PROJ" -f deploy/stack/docker-compose.yml -f deploy/stack/docker-compose.desktop.yml down -v >/dev/null 2>&1 || true
+# 注意：down -v 必须也能通过 compose 的变量替换（缺 DB_ROOT_PASSWORD/DB_PASSWORD 会静默失败，
+# 导致 db 数据卷残留 → MariaDB 沿用旧密码初始化 → web 连库被拒）
+DB_ROOT_PASSWORD=cleanup DB_PASSWORD=cleanup \
+  docker compose -p "$PROJ" -f deploy/stack/docker-compose.yml -f deploy/stack/docker-compose.desktop.yml down -v >/dev/null 2>&1 || true
 
 say "[1] 构建镜像（网关 + web 控制面）"
 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o dist/sr-linux-amd64 ./cmd/sr
@@ -56,19 +62,19 @@ say "[3] compose up（nginx + web + mariadb + gateway）"
 docker compose -p "$PROJ" --env-file "$WORKN/.env" \
   -f deploy/stack/docker-compose.yml -f deploy/stack/docker-compose.desktop.yml up -d --quiet-pull
 for i in $(seq 1 60); do
-  code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/login" 2>/dev/null || true)
+  code=$(curl -s -o "$DEVNULL" -w "%{http_code}" "$BASE/login" 2>/dev/null || true)
   [ "$code" = "200" ] && { echo "   web 就绪（经 nginx，尝试 $i 次）"; break; }
   [ "$i" = "60" ] && { echo "错误：web 未就绪"; docker logs "${PROJ}-web-1" 2>&1 | tail -20; exit 1; }
   sleep 2
 done
 
 say "[4] Web 流程：注册管理员 → 绑定 MFA"
-curl -s -c "$JAR" -b "$JAR" -o /dev/null -X POST "$BASE/register" \
+curl -s -c "$JAR" -b "$JAR" -o "$DEVNULL" -X POST "$BASE/register" \
   --data-urlencode "username=admin" --data-urlencode "password=e2e-pass-123" --data-urlencode "confirm=e2e-pass-123"
 curl -s -b "$JAR" "$BASE/settings?enroll=1" -o "$WORKN/s1.html"
 CSRF=$(grep -o 'name="csrf" value="[0-9a-f]*"' "$WORK/s1.html" | head -1 | grep -o '[0-9a-f]\{32\}')
 [ -n "$CSRF" ] || { echo "错误：拿不到 CSRF"; exit 1; }
-curl -s -b "$JAR" -o /dev/null -X POST "$BASE/settings/mfa/begin" --data-urlencode "csrf=$CSRF"
+curl -s -b "$JAR" -o "$DEVNULL" -X POST "$BASE/settings/mfa/begin" --data-urlencode "csrf=$CSRF"
 SECRET=$(docker exec "$DBC" mariadb -usr -p"$DBPW" -N -e "select totp_secret from users where username='admin'" selfremote | tr -d '\r')
 [ -n "$SECRET" ] || { echo "错误：DB 里没有 TOTP secret"; exit 1; }
 CODE=$(go run ./dist/totpgen -secret "$SECRET")
@@ -80,7 +86,7 @@ echo "   MFA 绑定成功（恢复码已生成）"
 say "[5] 用动态码重新登录 → 生成客户端密钥"
 rm -f "$JAR"
 CODE=$(go run ./dist/totpgen -secret "$SECRET")
-curl -s -c "$JAR" -b "$JAR" -o /dev/null -X POST "$BASE/login" \
+curl -s -c "$JAR" -b "$JAR" -o "$DEVNULL" -X POST "$BASE/login" \
   --data-urlencode "username=admin" --data-urlencode "password=e2e-pass-123" --data-urlencode "code=$CODE"
 curl -s -b "$JAR" "$BASE/devices/new" -o "$WORKN/devnew.html"
 CSRF=$(grep -o 'name="csrf" value="[0-9a-f]*"' "$WORK/devnew.html" | head -1 | grep -o '[0-9a-f]\{32\}')
@@ -114,7 +120,7 @@ say "[8] Web 吊销 → 网关踢下线"
 curl -s -b "$JAR" "$BASE/devices" -o "$WORKN/dev.html"
 CSRF=$(grep -o 'name="csrf" value="[0-9a-f]*"' "$WORK/dev.html" | head -1 | grep -o '[0-9a-f]\{32\}')
 DEV_ID=$(grep -o 'name="id" value="[0-9]*"' "$WORK/dev.html" | head -1 | grep -o '[0-9]*')
-curl -s -b "$JAR" -o /dev/null -X POST "$BASE/devices/revoke" --data-urlencode "csrf=$CSRF" --data-urlencode "id=$DEV_ID"
+curl -s -b "$JAR" -o "$DEVNULL" -X POST "$BASE/devices/revoke" --data-urlencode "csrf=$CSRF" --data-urlencode "id=$DEV_ID"
 sleep 4
 docker logs "$GWC" 2>&1 | grep -q "revoked" || { echo "错误：网关未收到吊销"; docker logs "$GWC" 2>&1 | tail -5; exit 1; }
 if docker exec sr-stack-cl ping -c 2 -W 2 192.168.99.5 >/dev/null 2>&1; then

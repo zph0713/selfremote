@@ -1,6 +1,6 @@
 # selfremote 架构设计
 
-> 状态：M1.0（协议核心开发中） · 更新：2026-09-11
+> 状态：M1.1（协议核心 ✅、分发流水线 ✅、Web 控制面 ✅；待 NAS 实机部署） · 更新：2026-09-12
 
 ## 1. 目标
 
@@ -50,6 +50,18 @@
 4. 出 LAN 前做 **MASQUERADE**：源地址改写为 NAS 自己的内网 IP（`192.168.1.5`）
 5. `192.168.1.50` 回包给 NAS → 内核按 conntrack 反向 NAT → 送回 `sr0` → 隧道回 Mac
 
+**控制面（可选，同一台 NAS 上的容器组，见 `deploy/stack`）**：
+
+```
+  浏览器 ──▶ nginx :8080 ──▶ web（注册 / 登录 / Google Authenticator / 设备密钥）
+                                │ 写 clients.json（白名单 + 每设备 MFA 密钥，热加载）
+                                │ 读 status.json / netinfo.json（网关发布的实时状态）
+                                ▼
+                          gateway（MFA 校验在加密隧道内完成；未通过前数据双向丢弃）
+                                │
+                              mariadb（账号 / 设备 / 会话）
+```
+
 **为什么 MASQUERADE 是必须的**：内网设备的路由表里没有 `10.77.0.0/24`，不回填的包会被它们直接丢弃（默认网关不认识隧道网段）。改写源地址后，对内网设备而言这次访问"就是 NAS 发起的"，因此**任意内网设备、任意端口、任意协议**都能直达 —— 这正是"内网 IP 直连"的实现方式。
 
 寻址规划：隧道网段 `10.77.0.0/24`；网关 `10.77.0.1/24`；客户端 `10.77.0.2/24`（/24 让客户端内核自动产生隧道网段直连路由）。
@@ -59,33 +71,45 @@ NAS 自身服务：经 `10.77.0.1` 或 LAN IP 均可访问（推荐前者，少�
 
 | 组件 | 运行位置 | 职责 |
 |---|---|---|
-| `sr gateway` | NAS / Docker（host 网络 + NET_ADMIN + /dev/net/tun） | tun 设备、UDP6 监听、转发 + SNAT（entrypoint 自动配置） |
-| `sr client` | Mac（root） | utun、路由注入、保活与重连 |
+| `sr gateway` | NAS / Docker（host 网络 + NET_ADMIN + /dev/net/tun） | tun 设备、UDP6 监听、转发 + SNAT（entrypoint 自动配置）；动态白名单热加载 + 隧道内 MFA 校验 |
+| `sr client` | Mac（root） | utun、路由注入、保活与重连；密钥文件解密 + 动态码提示 + 状态展示 |
+| `selfremote-web` | NAS / Docker（桥接网络） | 控制面：注册/登录/TOTP/设备密钥生成（.srkey）/仪表盘 |
+| nginx | NAS / Docker | 反向代理控制面（默认 :8080）；后续可加 TLS |
+| mariadb | NAS / Docker | 账号 / 设备 / 会话数据 |
 | DDNS 域名 | 现成 | 解析到 NAS 的 IPv6，客户端连接目标 |
 
 ```
-cmd/sr/           CLI 入口（genkey / gateway / client）
-internal/tunnel/  协议核心：握手、会话、帧、UDP 传输、TUN 设备
-internal/config/  配置加载（JSON）
-deploy/nas/       Dockerfile / compose / 部署说明
-docs/             本目录
+cmd/sr/            CLI 入口（genkey / gateway / client）
+cmd/web/           Web 控制面入口
+internal/tunnel/   协议核心：握手、会话、帧、MFA 校验、注册表热加载、TUN 设备
+internal/keyfile/  加密密钥文件（argon2id + ChaCha20-Poly1305）
+internal/webapp/   控制面：注册/登录/TOTP/设备管理/仪表盘
+internal/config/   配置加载（JSON）
+deploy/nas/        网关容器（Dockerfile / entrypoint / compose）
+deploy/stack/      全家桶 compose（nginx + web + mariadb + gateway）
+docs/              本目录
 ```
 
 ## 5. 协议概览
 
 - 握手：**Noise IK**（X25519 + ChaCha20-Poly1305 + BLAKE2s），双向认证、前向保密
-- 数据帧：`[ver][type][nonce:8]` + AEAD（显式 nonce + 64 位滑窗：丢包/乱序只影响单包）；类型：握手 ×2、DATA、KEEPALIVE、CTRL（预留）
+- 数据帧：`[ver][type][nonce:8]` + AEAD（显式 nonce + 64 位滑窗：丢包/乱序只影响单包）；类型：握手 ×2、DATA、KEEPALIVE、CTRL（预留）、AUTH 三件套、INFO、BYE（v0.2）
 - 会话：120s 或 2^20 包重密钥；10s 保活；25s 无收包重连
+- MFA（v0.2）：数据门控 + 隧道内动态码校验（±1 步、防重放、3 次失败锁定）
+- 注册表（v0.2）：`clients.json` 热加载，新增/吊销即时生效
 - 细节见 [PROTOCOL.md](PROTOCOL.md)
 
-安全模型：客户端预置网关公钥（防中间人）；网关以公钥白名单授权客户端（未授权握手静默丢弃）；重放由 nonce 单调性天然防护。
+安全模型：客户端预置网关公钥（防中间人）；网关以公钥白名单授权客户端（未授权握手静默丢弃）；
+重放由 nonce 单调性天然防护；连接另需实时动态码（Google Authenticator），
+密钥文件（.srkey）以「文件密码」加密分发。
 
 ## 6. 里程碑
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **M1.0** ✅ 已完成 | 仓库、文档、Go 环境、协议核心（握手/会话/帧/UDP/TUN）与单元/集成测试 | `go test ./...` 全绿（20 项：端到端、丢包、重放窗口、重连、重密钥、白名单）；五平台交叉编译通过 |
-| **M1.1** | NAS 网关（Docker）+ Mac 客户端真机联调 | 在外 Mac：① ping 通内网设备 ② SSH 内网设备 ③ 打开 DSM LAN IP 页面 ④ 挂载 SMB |
+| **M1.0** ✅ 已完成 | 仓库、文档、Go 环境、协议核心（握手/会话/帧/UDP/TUN）与单元/集成测试 | `go test ./...` 全绿（33 项：端到端、丢包、重放窗口、重连、重密钥、白名单、MFA、注册表、密钥文件）；五平台交叉编译通过 |
+| **M1.1a** ✅ 已完成 | Web 控制面（注册/登录/Google Auth MFA/设备密钥/仪表盘）+ 全家桶 compose 栈 + 发布流水线（含 web 镜像） | 本机全链路 e2e：注册→绑码→生成密钥→客户端带码连接→ping 内网→吊销踢下线 |
+| **M1.1b** 进行中 | NAS 实机部署 + Mac 真机联调 | 在外 Mac：① ping 通内网设备 ② SSH 内网设备 ③ 打开 DSM LAN IP 页面 ④ 挂载 SMB |
 | **M1.2** | 体验：开机自启（launchd）、断线重连、MTU/路由打磨 | 对外网环境连续使用 1 天无掉线无人值守 |
 | **M2** | 中转 + UDP 打洞（需公网 VPS 或复用现有服务器）、流量伪装层、多客户端 | 无 IPv6 的网络也能连通 |
 
@@ -111,6 +135,9 @@ docs/             本目录
 | 4 | 语言 | Go（TUN/打洞/并发生态、跨平台交叉编译） |
 | 5 | 服务器 | MVP 不加公网服务器，纯 IPv6 直连；中转/打洞推迟到 M2 |
 | 6 | 部署形态 | docker-first：网关（及未来中继）全部容器化（host 网络 + NET_ADMIN + /dev/net/tun）；Mac 客户端必须原生运行（utun/路由需宿主权限，无法容器化） |
+| 7 | 控制面（v0.2） | Web 管理页：Go 服务端渲染 + nginx 反代 + mariadb；注册制（首个账号 = 管理员，后续由管理员创建）；登录与连接双 MFA（Google Authenticator） |
+| 8 | 密钥分发（v0.2） | 网页生成即加密下载（`.srkey`：argon2id + ChaCha20-Poly1305 信封，文件密码由用户设定）；服务器只存公钥，私钥永不落服务器 |
+| 9 | MFA 校验位置（v0.2） | 隧道内密封控制帧（±1 步窗口、防重放、3 次失败锁定 30s）；未通过前数据帧双向丢弃 |
 
 ## 9. 待确认清单（部署前收集）
 

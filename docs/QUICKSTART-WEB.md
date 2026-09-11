@@ -92,6 +92,9 @@ sudo ./selfremote-macos-arm64 client -c client-mac-air.srkey
 - **动态码错误**：确认手机时间自动同步；连续错 3 次会锁定 30 秒
 - **「暂时无法生成」**：网关刚启动还没写 `netinfo.json`，等 30 秒刷新重试；
   或 `.env` 里显式设置 `SERVER_ADDR`
+- **改了 .env 里的数据库密码后 web 起不来（Access denied）**：MariaDB 只在**空数据卷**时
+  初始化密码。要么 `docker compose down -v` 删卷重建（会清空账号数据），要么进 db 容器用
+  root 改密码
 - **客户端连不上**：先 `docker logs <项目名>-gateway-1` 看网关日志；
   确认 UDP `TUNNEL_PORT` 可达（IPv6 需路由器放行；部分光猫需关防火墙）
 - **网页打不开**：`docker compose ps` 检查容器；`docker logs <项目名>-web-1`
