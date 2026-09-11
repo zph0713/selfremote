@@ -20,7 +20,7 @@ import (
 var assets embed.FS
 
 // Version is the control-plane version (displayed in the UI).
-const Version = "0.2.1"
+const Version = "0.2.2"
 
 // Config configures the control-plane server.
 type Config struct {

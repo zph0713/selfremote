@@ -30,12 +30,32 @@ type Device interface {
 // with a zeroed header (plain packets, no GSO) and queue extra read segments.
 const virtioNetHdrLen = 10
 
+// utunHeaderLen is the per-packet header (address family, host byte order)
+// that macOS utun sockets prepend. wireguard-go's darwin Read/Write require a
+// buffer offset of at least this size: data lands at [offset-utunHeaderLen:]
+// and the packet itself starts at offset.
+const utunHeaderLen = 4
+
 type wgTun struct {
 	dev tun.Device
+
+	// readOff is the offset passed to the underlying Device.Read; packets end
+	// up at scratch[i][readOff : readOff+size]. macOS needs >= utunHeaderLen
+	// (offset 0 panics inside wireguard-go with "slice bounds out of range
+	// [-4:]"); the Linux implementation is field-proven with 0.
+	readOff int
 
 	scratch [][]byte
 	sizes   []int
 	pending [][]byte
+}
+
+// readOffsetFor returns the read offset a platform requires.
+func readOffsetFor(goos string) int {
+	if goos == "darwin" {
+		return utunHeaderLen
+	}
+	return 0
 }
 
 func (w *wgTun) Read(buf []byte, offset int) (int, error) {
@@ -56,7 +76,7 @@ func (w *wgTun) Read(buf []byte, offset int) (int, error) {
 			}
 			w.sizes = make([]int, nb)
 		}
-		n, err := w.dev.Read(w.scratch, w.sizes, offset)
+		n, err := w.dev.Read(w.scratch, w.sizes, w.readOff)
 		if err != nil {
 			return 0, err
 		}
@@ -64,9 +84,9 @@ func (w *wgTun) Read(buf []byte, offset int) (int, error) {
 			continue
 		}
 		for i := 1; i < n; i++ {
-			w.pending = append(w.pending, append([]byte(nil), w.scratch[i][:w.sizes[i]]...))
+			w.pending = append(w.pending, append([]byte(nil), w.scratch[i][w.readOff:w.readOff+w.sizes[i]]...))
 		}
-		return copy(buf[offset:], w.scratch[0][:w.sizes[0]]), nil
+		return copy(buf[offset:], w.scratch[0][w.readOff:w.readOff+w.sizes[0]]), nil
 	}
 }
 
@@ -97,7 +117,7 @@ func CreateTUN(mtu int) (Device, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create tun device: %w", err)
 	}
-	return &wgTun{dev: dev}, nil
+	return &wgTun{dev: dev, readOff: readOffsetFor(runtime.GOOS)}, nil
 }
 
 // ifaceCommands builds the platform commands that configure (and tear down)

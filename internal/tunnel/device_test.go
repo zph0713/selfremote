@@ -1,9 +1,14 @@
 package tunnel
 
 import (
+	"bytes"
+	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 // TestIfaceCommandsDarwin pins the macOS command plan — especially the netmask
@@ -91,5 +96,113 @@ func TestIfaceCommandsErrors(t *testing.T) {
 	}
 	if _, _, err := ifaceCommands("darwin", "utun5", "not-a-cidr", nil); err == nil {
 		t.Fatal("bad cidr must be rejected")
+	}
+}
+
+// ------------------------------------------------------- read-offset contract
+
+// fakeTun emulates the offset semantics of a platform tun.Device.
+type fakeTun struct {
+	batches   [][]byte // packets to hand out
+	darwin    bool     // emulate macOS: data at [offset-4:], packet starts at offset
+	batchSize int
+}
+
+func (f *fakeTun) File() *os.File           { return nil }
+func (f *fakeTun) MTU() (int, error)        { return 1360, nil }
+func (f *fakeTun) Name() (string, error)    { return "faketun0", nil }
+func (f *fakeTun) Events() <-chan tun.Event { return nil }
+func (f *fakeTun) Close() error             { return nil }
+
+func (f *fakeTun) BatchSize() int {
+	if f.batchSize > 0 {
+		return f.batchSize
+	}
+	return 1
+}
+
+func (f *fakeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	if len(f.batches) == 0 {
+		return 0, errors.New("no packets queued")
+	}
+	if f.darwin && offset < 4 {
+		// wireguard-go's darwin Read does bufs[0][offset-4:]; replicate the
+		// resulting panic so a regression is caught by this test.
+		_ = bufs[0][offset-4:]
+	}
+	n := 0
+	for _, pkt := range f.batches {
+		if n >= len(bufs) {
+			break
+		}
+		if f.darwin {
+			region := bufs[n][offset-4:]
+			region[0], region[1], region[2], region[3] = 0, 0, 0, 0
+			copy(region[4:], pkt)
+		} else {
+			copy(bufs[n][offset:], pkt)
+		}
+		sizes[n] = len(pkt)
+		n++
+	}
+	f.batches = nil
+	return n, nil
+}
+
+func (f *fakeTun) Write(bufs [][]byte, offset int) (int, error) {
+	return len(bufs), nil
+}
+
+func TestReadOffsetFor(t *testing.T) {
+	if got := readOffsetFor("darwin"); got != utunHeaderLen {
+		t.Fatalf("darwin read offset = %d, want %d", got, utunHeaderLen)
+	}
+	if got := readOffsetFor("linux"); got != 0 {
+		t.Fatalf("linux read offset = %d, want 0", got)
+	}
+}
+
+// TestWgTunReadDarwinOffset pins the fix for the real-world panic
+// "slice bounds out of range [-4:]" seen on a Mac: wireguard-go's darwin tun
+// requires a read offset of at least 4 and places the packet at [offset:].
+func TestWgTunReadDarwinOffset(t *testing.T) {
+	pkt := testPacket(0x42)
+	dev := &fakeTun{batches: [][]byte{pkt}, darwin: true}
+	w := &wgTun{dev: dev, readOff: readOffsetFor("darwin")}
+	buf := make([]byte, 2048)
+	n, err := w.Read(buf, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(buf[:n], pkt) {
+		t.Fatalf("darwin read mismatch:\n got %x\nwant %x", buf[:n], pkt)
+	}
+
+	// Regression guard: with readOff 0 the darwin contract is violated (this
+	// is the exact crash from the field).
+	bad := &wgTun{dev: &fakeTun{batches: [][]byte{pkt}, darwin: true}, readOff: 0}
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("readOff=0 must violate the darwin offset contract")
+			}
+		}()
+		_, _ = bad.Read(buf, 0)
+	}()
+}
+
+func TestWgTunReadLinuxAndPendingQueue(t *testing.T) {
+	a, b := testPacket(1), testPacket(2)
+	dev := &fakeTun{batches: [][]byte{a, b}, batchSize: 2}
+	w := &wgTun{dev: dev, readOff: readOffsetFor("linux")}
+	buf := make([]byte, 4096)
+
+	n, err := w.Read(buf, 0)
+	if err != nil || !bytes.Equal(buf[:n], a) {
+		t.Fatalf("linux read #1 (err=%v)", err)
+	}
+	n, err = w.Read(buf, 0) // served from the pending queue
+	if err != nil || !bytes.Equal(buf[:n], b) {
+		t.Fatalf("linux read #2 from pending queue (err=%v)", err)
 	}
 }
