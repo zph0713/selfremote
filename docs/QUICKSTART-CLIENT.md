@@ -55,6 +55,13 @@
 
 ## 4. 运行（需要管理员权限：要创建虚拟网卡）
 
+> 从 [Releases](https://github.com/zph0713/selfremote/releases) 下载的**整包 zip 里带「双击启动.command」**：
+> 在 Mac 上双击它即可（自动识别芯片、修权限、运行）。首次被 macOS 拦截时，
+> 对文件点【右键】→【打开】。
+>
+> ⚠️ 不要双击 `selfremote-macos-arm64` 本体——它是程序不是文档，
+> 直接双击会被 macOS 当文本打开，报「文本编码 Unicode（UTF-8）不适用」。
+
 **macOS：**
 
 ```sh

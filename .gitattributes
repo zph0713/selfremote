@@ -1,0 +1,4 @@
+# 脚本类文件永远使用 LF 换行（LF 是 Mac/Linux 上可执行的前提）
+*.command text eol=lf
+*.sh      text eol=lf
+Dockerfile text eol=lf

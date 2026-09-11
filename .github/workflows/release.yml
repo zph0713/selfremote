@@ -40,6 +40,8 @@ jobs:
           cp dist/selfremote-macos-arm64 dist/selfremote-macos-amd64 pkg/
           cp docs/QUICKSTART-CLIENT.md pkg/README-使用说明.md
           cp deploy/examples/client.json.example pkg/client.json.example
+          cp deploy/mac/start.command pkg/双击启动.command
+          chmod +x pkg/双击启动.command pkg/selfremote-macos-*
           (cd pkg && zip -r ../dist/selfremote-macos.zip .)
 
       - name: Create GitHub release
