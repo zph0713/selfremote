@@ -7,7 +7,8 @@
 //
 //	sr genkey              generate an X25519 key pair (base64)
 //	sr gateway -c <file>   run as home gateway (on the NAS)
-//	sr client  -c <file>   run as client (on the Mac)
+//	sr client  -c <file>   run as client (on the Mac; <file> may be an
+//	                       encrypted key file downloaded from the web UI)
 package main
 
 import (
@@ -23,10 +24,11 @@ import (
 	"github.com/flynn/noise"
 
 	"selfremote/internal/config"
+	"selfremote/internal/keyfile"
 	"selfremote/internal/tunnel"
 )
 
-const version = "0.1.1"
+const version = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -63,6 +65,8 @@ usage:
   sr genkey                 generate an X25519 key pair (base64)
   sr gateway -c <file>      run as home gateway (on the NAS)
   sr client  -c <file>      run as client (on the Mac)
+                            <file> may be an encrypted key file (.srkey)
+                            downloaded from the web UI
   sr version
 `)
 }
@@ -101,11 +105,12 @@ func cmdGateway(args []string) error {
 		peers = append(peers, tunnel.PeerConfig{Name: p.Name, PublicKey: key[:]})
 	}
 	eng, err := tunnel.New(tunnel.Options{
-		Mode:       tunnel.ModeGateway,
-		PrivateKey: cfg.Private[:],
-		Listen:     cfg.Listen,
-		Peers:      peers,
-		TunnelCIDR: cfg.TunnelCIDR,
+		Mode:        tunnel.ModeGateway,
+		PrivateKey:  cfg.Private[:],
+		Listen:      cfg.Listen,
+		Peers:       peers,
+		ClientsFile: cfg.ClientsFile,
+		TunnelCIDR:  cfg.TunnelCIDR,
 	})
 	if err != nil {
 		return err
@@ -114,26 +119,81 @@ func cmdGateway(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("selfremote gateway\n")
+	if cfg.StatusFile != "" || cfg.NetInfoFile != "" {
+		go runStatusWriter(ctx, eng, cfg.StatusFile, cfg.NetInfoFile)
+	}
+
+	fmt.Printf("selfremote gateway %s\n", version)
 	fmt.Printf("  listen:     %s\n", eng.LocalAddr())
 	fmt.Printf("  public key: %s\n", base64.StdEncoding.EncodeToString(eng.PublicKey()))
 	fmt.Printf("  tunnel:     %s\n", cfg.TunnelCIDR)
 	fmt.Printf("  peers:      %d\n", len(peers))
+	if cfg.ClientsFile != "" {
+		fmt.Printf("  clients:    %s (hot-reloaded)\n", cfg.ClientsFile)
+	}
+	if cfg.StatusFile != "" {
+		fmt.Printf("  status:     %s\n", cfg.StatusFile)
+	}
 	return eng.Run(ctx)
 }
 
 func cmdClient(args []string) error {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
-	cfgPath := fs.String("c", "", "path to client config file")
+	cfgPath := fs.String("c", "", "path to client config file (json, or an encrypted key file)")
+	kpass := fs.String("kpass", "", "key-file passphrase (automation; prefer the interactive prompt)")
+	mfaCode := fs.String("mfa", "", "MFA code for the first attempt (automation; prefer the interactive prompt)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cfgPath == "" {
 		return fmt.Errorf("missing -c <config file>")
 	}
-	cfg, err := config.LoadClient(*cfgPath)
+
+	raw, err := os.ReadFile(*cfgPath)
 	if err != nil {
 		return err
+	}
+
+	// Encrypted key file: unlock first (in memory only).
+	if keyfile.IsEnvelope(raw) {
+		pass := *kpass
+		if pass == "" {
+			pass = os.Getenv("SR_KEYPASS")
+		}
+		plain, err := unlockKeyfile(raw, pass)
+		if err != nil {
+			return err
+		}
+		raw = plain
+		fmt.Println("密钥文件已解密（仅保存在内存中）")
+	}
+
+	cfg, err := config.LoadClientBytes(raw, *cfgPath)
+	if err != nil {
+		return err
+	}
+
+	// MFA prompt. A code passed via -mfa / SR_MFA is used for the first
+	// attempt only; interactive retries always go through the prompt.
+	mfaFirst := *mfaCode
+	if mfaFirst == "" {
+		mfaFirst = os.Getenv("SR_MFA")
+	}
+	var mfaTaken bool
+	cs := &clientState{}
+	authPrompt := func(attempt int) (string, bool) {
+		if mfaFirst != "" && !mfaTaken {
+			mfaTaken = true
+			cs.setMFAUsed()
+			return mfaFirst, true
+		}
+		fmt.Fprintf(os.Stderr, "请输入 Google Authenticator 动态验证码（6 位，直接回车取消）: ")
+		line, err := readLine()
+		if err != nil || line == "" {
+			return "", false
+		}
+		cs.setMFAUsed()
+		return line, true
 	}
 
 	eng, err := tunnel.New(tunnel.Options{
@@ -143,6 +203,9 @@ func cmdClient(args []string) error {
 		ServerPublic: cfg.ServerPublic[:],
 		TunnelCIDR:   cfg.TunnelCIDR,
 		Routes:       cfg.Routes,
+		AuthPrompt:   authPrompt,
+		OnReady:      func() { cs.onReady(cfg) },
+		OnInfo:       cs.onInfo,
 	})
 	if err != nil {
 		return err
@@ -151,9 +214,16 @@ func cmdClient(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("selfremote client\n")
+	fmt.Printf("selfremote client %s\n", version)
 	fmt.Printf("  server: %s\n", cfg.Server)
 	fmt.Printf("  tunnel: %s\n", cfg.TunnelCIDR)
 	fmt.Printf("  routes: %v\n", cfg.Routes)
-	return eng.Run(ctx)
+
+	go statusLoop(ctx, eng, cs.isReady)
+
+	if err := eng.Run(ctx); err != nil {
+		return err
+	}
+	fmt.Println("已断开，路由已清理。")
+	return nil
 }

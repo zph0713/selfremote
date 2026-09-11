@@ -84,7 +84,28 @@ type peerState struct {
 
 	lastRecv time.Time
 	lastSend time.Time
+
+	// MFA state. Gateway: whether this peer passed the in-tunnel auth check.
+	// Client: whether the session is ready for use.
+	authed          bool
+	authAttempts    int
+	lastAuthStep    int64     // last accepted TOTP time step (anti-replay)
+	challengeAt     time.Time // gateway: last challenge (re)sent
+	authDeadline    time.Time // gateway: give up after this instant
+	authLockedUntil time.Time // gateway: temporary block after 3 failures
+	authPrompting   bool      // client: a prompt is in flight
+	authSentAt      time.Time // client: last AUTH_RESP sent
+
+	// Stats.
+	bytesIn  uint64
+	bytesOut uint64
+
+	// static marks peers from the static config (never touched by the
+	// registry reloader).
+	static bool
 }
+
+func (p *peerState) requiresMFA() bool { return p.cfg.TOTPSecret != "" }
 
 // Status is a snapshot of an Engine's state (used by tests and reporting).
 type Status struct {
@@ -113,6 +134,18 @@ type Engine struct {
 	addr2peer  map[string]*peerState // gateway: source address -> peer
 	handshakes uint64
 	redialing  bool
+
+	// Registry state (clients.json).
+	regMod     time.Time
+	regInit    bool
+	regMissing bool
+
+	// Client: ready callback fired once per run.
+	clientReady bool
+
+	// Fatal client error (auth aborted) and the run's cancel func.
+	fatal     error
+	cancelRun context.CancelFunc
 }
 
 // New validates options, creates the TUN device and (for gateways) binds the
@@ -148,14 +181,14 @@ func New(opts Options) (*Engine, error) {
 		if opts.Listen == "" {
 			return nil, errors.New("gateway: listen address required")
 		}
-		if len(opts.Peers) == 0 {
-			return nil, errors.New("gateway: at least one peer required")
+		if len(opts.Peers) == 0 && opts.ClientsFile == "" {
+			return nil, errors.New("gateway: at least one peer or a clients file required")
 		}
 		for _, pc := range opts.Peers {
 			if len(pc.PublicKey) != 32 {
 				return nil, fmt.Errorf("peer %q: public key must be 32 bytes", pc.Name)
 			}
-			e.peers[hex.EncodeToString(pc.PublicKey)] = &peerState{cfg: pc}
+			e.addPeerLocked(pc, true)
 		}
 	case ModeClient:
 		if opts.Server == "" {
@@ -245,6 +278,9 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.logf("%s: running (tunnel %s, mtu %d)", modeName(e.opts.Mode), e.opts.TunnelCIDR, e.opts.MTU)
 
 	runCtx, cancel := context.WithCancel(ctx)
+	e.mu.Lock()
+	e.cancelRun = cancel
+	e.mu.Unlock()
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -256,6 +292,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.writeLoop(runCtx)
 	}()
 	e.timerLoop(runCtx)
+	e.sendBye()
 	cancel()
 
 	e.mu.Lock()
@@ -269,6 +306,12 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.dev.Close()
 	}
 	wg.Wait()
+	e.mu.Lock()
+	fatal := e.fatal
+	e.mu.Unlock()
+	if fatal != nil {
+		return fatal
+	}
 	return nil
 }
 
@@ -372,11 +415,14 @@ func (e *Engine) timerLoop(ctx context.Context) {
 // tick drives handshakes, keepalives, dead-peer detection and rekeying.
 func (e *Engine) tick() {
 	now := time.Now()
+	e.reloadRegistry()
 	type pending struct {
 		p     *peerState
 		frame []byte
 	}
 	var sends []pending
+	var onReady bool
+	var repromptPeer *peerState
 
 	e.mu.Lock()
 	for _, p := range e.peers {
@@ -389,10 +435,48 @@ func (e *Engine) tick() {
 		if p.cur != nil && now.Sub(p.lastRecv) > e.opts.DeadTimeout {
 			e.logf("peer %s: no traffic for %v, dropping session", p.cfg.Name, now.Sub(p.lastRecv).Round(time.Second))
 			p.cur, p.prev = nil, nil
+			p.authed = false
+			p.authSentAt = time.Time{}
 			p.nextAttempt = now
 			if e.opts.Mode == ModeClient {
 				e.redialAsyncLocked()
 			}
+		}
+
+		// Gateway: MFA session management — (re)send the challenge and give
+		// up if no valid code arrives in time.
+		if e.opts.Mode == ModeGateway && p.requiresMFA() && p.cur != nil && !p.authed {
+			switch {
+			case !now.Before(p.authDeadline):
+				e.logf("peer %s: MFA timeout, dropping session", p.cfg.Name)
+				p.cur, p.prev = nil, nil
+			case now.Sub(p.challengeAt) > 5*time.Second:
+				if frame, err := sealDataFrame(p.cur.send, frameAuthChallenge, p.cur.sendNonce, authChallengePayload(true)); err == nil {
+					p.cur.sendNonce++
+					p.lastSend = now
+					p.challengeAt = now
+					sends = append(sends, pending{p, frame})
+				}
+			}
+		}
+
+		// Client: if the gateway never asks for a code (older build), proceed
+		// after a short grace period.
+		if e.opts.Mode == ModeClient && p.cur != nil && !p.authed && !p.authPrompting &&
+			p.authSentAt.IsZero() && now.Sub(p.cur.established) > authGrace {
+			p.authed = true
+			if !e.clientReady {
+				e.clientReady = true
+				onReady = true
+			}
+		}
+
+		// Client: a submitted code (or its result) can be lost on the wire;
+		// ask for a fresh one instead of hanging forever.
+		if e.opts.Mode == ModeClient && p.cur != nil && !p.authed && !p.authPrompting &&
+			!p.authSentAt.IsZero() && now.Sub(p.authSentAt) > 8*time.Second {
+			p.authSentAt = time.Time{}
+			repromptPeer = p
 		}
 
 		if e.opts.Mode == ModeClient {
@@ -425,6 +509,13 @@ func (e *Engine) tick() {
 	}
 	e.mu.Unlock()
 
+	if onReady && e.opts.OnReady != nil {
+		e.opts.OnReady()
+	}
+	if repromptPeer != nil {
+		e.handleAuthChallenge(repromptPeer, authChallengePayload(true))
+	}
+
 	for _, s := range sends {
 		e.writeWire(s.p, s.frame)
 	}
@@ -446,7 +537,7 @@ func (e *Engine) handlePacket(addr *net.UDPAddr, frame []byte) {
 		if e.opts.Mode == ModeClient {
 			e.handleHandshakeResp(payload)
 		}
-	case frameData, frameKeepalive:
+	case frameData, frameKeepalive, frameAuthChallenge, frameAuthResp, frameAuthResult, frameInfo, frameBye:
 		nonce, err := dataNonce(payload)
 		if err != nil {
 			return
@@ -472,6 +563,15 @@ func (e *Engine) handleHandshakeInit(addr *net.UDPAddr, payload []byte) {
 		e.logf("gateway: unauthorized client %s from %s", shortKey(hs.PeerStatic()), addr)
 		return
 	}
+
+	// Locked-out peers (too many bad MFA codes) are ignored for a while.
+	e.mu.Lock()
+	locked := p.requiresMFA() && time.Now().Before(p.authLockedUntil)
+	e.mu.Unlock()
+	if locked {
+		e.logf("gateway: peer %s temporarily locked (MFA failures)", p.cfg.Name)
+		return
+	}
 	msg2, cs1, cs2, err := hs.WriteMessage(frameHeader(frameHandshakeResp), nil)
 	if err != nil {
 		e.logf("gateway: handshake write: %v", err)
@@ -487,6 +587,18 @@ func (e *Engine) handleHandshakeInit(addr *net.UDPAddr, payload []byte) {
 	e.installSession(p, cs2, cs1)
 	e.writeWire(p, msg2)
 	e.logf("gateway: session established with %s (%s)", p.cfg.Name, addr)
+
+	// MFA gating + server info (v0.2 frames; older clients ignore them).
+	e.mu.Lock()
+	required := p.requiresMFA() && !p.authed
+	if required {
+		p.authAttempts = 0
+		p.authDeadline = time.Now().Add(mfaAuthWindow)
+		p.challengeAt = time.Now()
+	}
+	e.mu.Unlock()
+	e.sendSealed(p, frameAuthChallenge, authChallengePayload(required))
+	e.sendSealed(p, frameInfo, e.serverInfoJSON(p))
 }
 
 func (e *Engine) handleHandshakeResp(payload []byte) {
@@ -516,6 +628,12 @@ func (e *Engine) handleHandshakeResp(payload []byte) {
 	// Initiator side: (cs1, cs2) = (send, recv) per the Noise spec ordering.
 	e.installSession(p, cs1, cs2)
 	e.logf("client: session established (%s)", p.cfg.Name)
+	e.mu.Lock()
+	// A new session starts out unauthenticated on the wire; the gateway
+	// decides (challenge frame) whether a fresh code is required.
+	p.authed = false
+	p.authSentAt = time.Time{}
+	e.mu.Unlock()
 }
 
 func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
@@ -584,6 +702,7 @@ func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
 		return // undecryptable: drop
 	}
 	p.lastRecv = now
+	p.bytesIn += uint64(len(frame))
 	if addr != nil {
 		if p.addr == nil || p.addr.String() != addr.String() {
 			e.logf("peer %s: endpoint updated to %s", p.cfg.Name, addr)
@@ -591,11 +710,44 @@ func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
 		}
 		e.addr2peer[addr.String()] = p
 	}
+	gate := e.opts.Mode == ModeGateway && p.requiresMFA() && !p.authed
 	e.mu.Unlock()
 
-	if len(pt) > 0 {
-		if _, err := e.dev.Write(pt, 0); err != nil {
-			e.logf("tun write: %v", err)
+	switch frame[1] {
+	case frameKeepalive:
+		// liveness only
+	case frameBye:
+		if e.opts.Mode == ModeGateway {
+			e.logf("peer %s: client disconnected (bye)", p.cfg.Name)
+			e.mu.Lock()
+			p.cur, p.prev = nil, nil
+			p.authed = false
+			e.mu.Unlock()
+		}
+	case frameAuthResp:
+		if e.opts.Mode == ModeGateway {
+			e.handleAuthResp(p, pt)
+		}
+	case frameAuthChallenge:
+		if e.opts.Mode == ModeClient {
+			e.handleAuthChallenge(p, pt)
+		}
+	case frameAuthResult:
+		if e.opts.Mode == ModeClient {
+			e.handleAuthResult(p, pt)
+		}
+	case frameInfo:
+		if e.opts.Mode == ModeClient {
+			e.handleInfo(p, pt)
+		}
+	default: // frameData
+		if gate {
+			break // unauthenticated MFA peer: drop data until the code passes
+		}
+		if len(pt) > 0 {
+			if _, err := e.dev.Write(pt, 0); err != nil {
+				e.logf("tun write: %v", err)
+			}
 		}
 	}
 }
@@ -613,7 +765,7 @@ func (e *Engine) sendData(pkt []byte) {
 
 	e.mu.Lock()
 	for _, p := range e.peers {
-		if p.cur == nil {
+		if p.cur == nil || !p.authed {
 			continue
 		}
 		frame, err := sealDataFrame(p.cur.send, frameData, p.cur.sendNonce, pkt)
@@ -637,6 +789,7 @@ func (e *Engine) writeWire(p *peerState, frame []byte) {
 	e.mu.Lock()
 	conn := e.conn
 	addr := p.addr
+	p.bytesOut += uint64(len(frame))
 	e.mu.Unlock()
 	if conn == nil || len(frame) == 0 {
 		return

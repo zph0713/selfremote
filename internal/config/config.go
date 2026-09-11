@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,11 @@ type Gateway struct {
 	TunnelCIDR string `json:"tunnel_cidr"` // e.g. "10.77.0.1/24"
 	Peers      []Peer `json:"peers"`
 
+	// Web control plane integration (all optional).
+	ClientsFile string `json:"clients_file,omitempty"` // hot-reloaded client registry (JSON)
+	StatusFile  string `json:"status_file,omitempty"`  // live status written for the web UI
+	NetInfoFile string `json:"netinfo_file,omitempty"` // host network info written for the web UI
+
 	// Parsed on load.
 	Private  Key   `json:"-"`
 	PeerKeys []Key `json:"-"`
@@ -69,8 +75,8 @@ func LoadGateway(path string) (*Gateway, error) {
 	if g.Private, err = ParseKey(g.PrivateKey); err != nil {
 		return nil, fmt.Errorf("%s: private_key: %w", path, err)
 	}
-	if len(g.Peers) == 0 {
-		return nil, fmt.Errorf("%s: at least one peer is required", path)
+	if len(g.Peers) == 0 && g.ClientsFile == "" {
+		return nil, fmt.Errorf("%s: at least one peer (or clients_file) is required", path)
 	}
 	for i, p := range g.Peers {
 		k, err := ParseKey(p.PublicKey)
@@ -88,17 +94,39 @@ func LoadClient(path string) (*Client, error) {
 	if err := load(path, &c); err != nil {
 		return nil, err
 	}
+	if err := c.validate(path); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// LoadClientBytes parses a client config from raw bytes (e.g. after
+// decrypting a key file). name is used in error messages.
+func LoadClientBytes(data []byte, name string) (*Client, error) {
+	var c Client
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if err := c.validate(name); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (c *Client) validate(name string) error {
 	if c.Server == "" {
-		return nil, fmt.Errorf("%s: server is required", path)
+		return fmt.Errorf("%s: server is required", name)
 	}
 	var err error
 	if c.Private, err = ParseKey(c.PrivateKey); err != nil {
-		return nil, fmt.Errorf("%s: private_key: %w", path, err)
+		return fmt.Errorf("%s: private_key: %w", name, err)
 	}
 	if c.ServerPublic, err = ParseKey(c.ServerPublicKey); err != nil {
-		return nil, fmt.Errorf("%s: server_public_key: %w", path, err)
+		return fmt.Errorf("%s: server_public_key: %w", name, err)
 	}
-	return &c, nil
+	return nil
 }
 
 func load(path string, v any) error {
