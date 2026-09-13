@@ -1,5 +1,8 @@
 # 群晖 NAS 部署
 
+> 用群晖 Container Manager **图形界面**一步步装（含 .env、初始化、外网可达、运维、常见坑），
+> 见 [DEPLOY-SYNOLOGY.md](DEPLOY-SYNOLOGY.md)。本页是命令行/单容器形态的部署说明。
+
 > 目标：DSM 7.2+（Container Manager）· v0.3 起 NAS 通常同时扮演
 > **中转服务端（server）** 与 **本机站点（agent-home）**；远程站点各自在别的机器上跑 agent。
 

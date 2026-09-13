@@ -29,7 +29,7 @@ docker compose up -d    # nginx + web + mariadb + server
 （本机站点 id 用 `home`）→ 下载部署包 → 把包里的 `.srkey` 放到数据目录并 `docker compose up -d agent-home`。
 
 详见 [docs/QUICKSTART-WEB.md](docs/QUICKSTART-WEB.md)；纯命令行模式（无 Web）见
-[docs/QUICKSTART-SERVER.md](docs/QUICKSTART-SERVER.md)；群晖细节见 [docs/DEPLOY-NAS.md](docs/DEPLOY-NAS.md)
+[docs/QUICKSTART-SERVER.md](docs/QUICKSTART-SERVER.md)；群晖细节见 [docs/DEPLOY-NAS.md](docs/DEPLOY-NAS.md)；**群晖 Container Manager 图形界面一步步装**见 [docs/DEPLOY-SYNOLOGY.md](docs/DEPLOY-SYNOLOGY.md)
 
 ### 💻 客户端（在外网的设备）
 
@@ -57,7 +57,7 @@ curl -fsSL http://<控制面>:8080/install.sh | sudo bash -s -- --code ABCD-EFGH
 
 - [Web 控制面：部署与使用（推荐）](docs/QUICKSTART-WEB.md)
 - [客户端快速开始](docs/QUICKSTART-CLIENT.md) · [服务端 / 站点（命令行模式）](docs/QUICKSTART-SERVER.md)
-- [架构设计](docs/DESIGN.md) · [协议规格](docs/PROTOCOL.md) · [群晖 NAS 部署](docs/DEPLOY-NAS.md)
+- [架构设计](docs/DESIGN.md) · [协议规格](docs/PROTOCOL.md) · [群晖 NAS 部署](docs/DEPLOY-NAS.md) · [群晖 Container Manager 部署手册](docs/DEPLOY-SYNOLOGY.md)
 
 ## 开发
 
