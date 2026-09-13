@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"selfremote/internal/serverapp"
 	"selfremote/internal/tunnel"
 )
 
@@ -36,15 +38,14 @@ func runStatusWriter(ctx context.Context, eng *tunnel.Engine, statusFile, netInf
 		}
 		for _, p := range peers {
 			sp := statusPeer{
-				Name: p.Name, User: p.User, Remote: p.Remote,
+				Name: p.Name, User: p.User, Role: p.Role, Remote: p.Remote,
 				Connected: p.Connected, Authed: p.Authed, MFA: p.MFA,
 				Rx: p.BytesIn, Tx: p.BytesOut,
+				Since: p.Since, LastRecv: p.LastRecv,
+				TunnelIP: p.TunnelIP, Routes: p.Routes,
 			}
-			if !p.Since.IsZero() {
-				sp.Since = p.Since.Format(time.RFC3339)
-			}
-			if !p.LastRecv.IsZero() {
-				sp.LastRecv = p.LastRecv.Format(time.RFC3339)
+			if p.Enabled != nil {
+				sp.Enabled = p.Enabled
 			}
 			if p.Connected {
 				out.Totals.Online++
@@ -101,6 +102,68 @@ func runStatusWriter(ctx context.Context, eng *tunnel.Engine, statusFile, netInf
 	}
 }
 
+// runServerStatusWriter publishes the hub snapshot to a JSON file (debugging
+// and CLI tooling; the web control plane uses the control API instead).
+func runServerStatusWriter(ctx context.Context, api *serverapp.Server, path string) {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	write := func() {
+		if err := atomicWriteJSON(path, api.Snapshot()); err != nil {
+			log.Printf("status writer: %v", err)
+		}
+	}
+	write()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			write()
+		}
+	}
+}
+
+// runAgentStatusWriter keeps a local snapshot of the agent's state, so the
+// site operator can see (and script around) the tunnel without reading logs.
+func runAgentStatusWriter(ctx context.Context, eng *tunnel.Engine, path string) {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	write := func() {
+		st := agentStatusJSON{
+			UpdatedAt: time.Now().Format(time.RFC3339),
+			Server:    eng.LocalAddr(),
+			Serving:   eng.Forwarding(),
+			Drops:     eng.AgentDrops(),
+			PublicKey: base64.StdEncoding.EncodeToString(eng.PublicKey()),
+		}
+		if info := eng.AgentStatus(); info != nil {
+			st.MFA = true
+			st.TunnelIP = info.TunnelIP
+			st.Connected = info.Serving || info.UptimeS > 0
+		}
+		for _, p := range eng.Stats() {
+			if p.Connected {
+				st.Connected = true
+			}
+		}
+		if path == "" {
+			return
+		}
+		if err := atomicWriteJSON(path, st); err != nil {
+			log.Printf("agent status writer: %v", err)
+		}
+	}
+	write()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			write()
+		}
+	}
+}
+
 type statusJSON struct {
 	UpdatedAt string       `json:"updated_at"`
 	Listen    string       `json:"listen"`
@@ -114,16 +177,20 @@ type statusTotals struct {
 }
 
 type statusPeer struct {
-	Name      string `json:"name"`
-	User      string `json:"user,omitempty"`
-	Remote    string `json:"remote,omitempty"`
-	Connected bool   `json:"connected"`
-	Authed    bool   `json:"authed"`
-	MFA       bool   `json:"mfa"`
-	Since     string `json:"since,omitempty"`
-	LastRecv  string `json:"last_recv,omitempty"`
-	Rx        uint64 `json:"rx_bytes"`
-	Tx        uint64 `json:"tx_bytes"`
+	Name      string   `json:"name"`
+	User      string   `json:"user,omitempty"`
+	Role      string   `json:"role,omitempty"`
+	Remote    string   `json:"remote,omitempty"`
+	Connected bool     `json:"connected"`
+	Authed    bool     `json:"authed"`
+	MFA       bool     `json:"mfa"`
+	Since     string   `json:"since,omitempty"`
+	LastRecv  string   `json:"last_recv,omitempty"`
+	Rx        uint64   `json:"rx_bytes"`
+	Tx        uint64   `json:"tx_bytes"`
+	TunnelIP  string   `json:"tunnel_ip,omitempty"`
+	Routes    []string `json:"routes,omitempty"`
+	Enabled   *bool    `json:"enabled,omitempty"`
 }
 
 type netInfoJSON struct {

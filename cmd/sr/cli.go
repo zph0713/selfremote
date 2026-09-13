@@ -144,11 +144,20 @@ func statusLoop(ctx context.Context, eng *tunnel.Engine, isReady func() bool) {
 			for _, st := range eng.Stats() {
 				if st.Connected && st.Authed {
 					fmt.Printf("[状态] 已连接 %s · ↑%s ↓%s · 对端 %s\n",
-						humanDur(time.Since(st.Since)), humanBytes(st.BytesOut), humanBytes(st.BytesIn), st.Remote)
+						sinceDur(st.Since), humanBytes(st.BytesOut), humanBytes(st.BytesIn), st.Remote)
 				}
 			}
 		}
 	}
+}
+
+// sinceDur renders one of the engine's RFC3339 timestamps as elapsed time.
+func sinceDur(ts string) string {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return "—"
+	}
+	return humanDur(time.Since(t))
 }
 
 func humanBytes(n uint64) string {

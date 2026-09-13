@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/flynn/noise"
@@ -85,6 +87,16 @@ type peerState struct {
 	lastRecv time.Time
 	lastSend time.Time
 
+	// Server mode: role, relay addressing and reporting.
+	role       PeerRole
+	tunnelIP   netip.Addr
+	routes     []RouteMap // agents: real↔virtual prefixes
+	info       *AgentInfo // agents: latest announce frame
+	announceAt time.Time  // server: when the last announce arrived
+	mismatch   bool       // server: announce disagrees with the registry
+	cmdAt      time.Time  // agents: when the last CMD was sent
+	dropAt     time.Time  // relay: last rate-limited drop log
+
 	// MFA state. Gateway: whether this peer passed the in-tunnel auth check.
 	// Client: whether the session is ready for use.
 	authed          bool
@@ -135,10 +147,31 @@ type Engine struct {
 	handshakes uint64
 	redialing  bool
 
-	// Registry state (clients.json).
+	// Registry state (clients.json / agents.json).
 	regMod     time.Time
 	regInit    bool
 	regMissing bool
+
+	aregMod     time.Time
+	aregInit    bool
+	aregMissing bool
+
+	// Server mode: routing table (virtual prefix -> agent) and relay counters.
+	routes      []routeEntry
+	clientsByIP map[netip.Addr]*peerState
+	agentsByIP  map[netip.Addr]*peerState
+	localAddr   netip.Addr // our own address on the tunnel network
+	conflicts   []string
+	relay       relayCounters
+
+	// Agent mode: address translation, forwarding gate and announce timer.
+	translator    *Translator
+	forwarding    atomic.Bool
+	announceAt    time.Time
+	agentStarted  time.Time
+	agentDrops    atomic.Uint64
+	agentDropLog  time.Time
+	lastAgentInfo *AgentInfo // our own last announce (for status)
 
 	// Client: ready callback fired once per run.
 	clientReady bool
@@ -177,12 +210,12 @@ func New(opts Options) (*Engine, error) {
 	e.pub = append([]byte(nil), pub...)
 
 	switch opts.Mode {
-	case ModeGateway:
+	case ModeGateway, ModeServer:
 		if opts.Listen == "" {
-			return nil, errors.New("gateway: listen address required")
+			return nil, errors.New("gateway/server: listen address required")
 		}
-		if len(opts.Peers) == 0 && opts.ClientsFile == "" {
-			return nil, errors.New("gateway: at least one peer or a clients file required")
+		if len(opts.Peers) == 0 && opts.ClientsFile == "" && opts.AgentsFile == "" {
+			return nil, errors.New("gateway/server: at least one peer or a registry file required")
 		}
 		for _, pc := range opts.Peers {
 			if len(pc.PublicKey) != 32 {
@@ -200,21 +233,43 @@ func New(opts Options) (*Engine, error) {
 		e.peers[hex.EncodeToString(opts.ServerPublic)] = &peerState{
 			cfg: PeerConfig{Name: "gateway", PublicKey: opts.ServerPublic},
 		}
+	case ModeAgent:
+		if opts.Server == "" {
+			return nil, errors.New("agent: server address required")
+		}
+		if len(opts.ServerPublic) != 32 {
+			return nil, errors.New("agent: server public key must be 32 bytes")
+		}
+		name := "server"
+		if opts.AgentID != "" {
+			name = "server (agent " + opts.AgentID + ")"
+		}
+		e.peers[hex.EncodeToString(opts.ServerPublic)] = &peerState{
+			cfg: PeerConfig{Name: name, PublicKey: opts.ServerPublic},
+		}
+		tr, err := NewTranslator(opts.RouteMaps, tunnelAddr(opts.TunnelCIDR))
+		if err != nil {
+			return nil, fmt.Errorf("agent: routes: %w", err)
+		}
+		e.translator = tr
+		e.forwarding.Store(true)
 	default:
 		return nil, fmt.Errorf("unknown mode %d", opts.Mode)
 	}
 
-	if opts.Device != nil {
-		e.dev = opts.Device
-	} else {
-		dev, err := CreateTUN(opts.MTU)
-		if err != nil {
-			return nil, err
+	if opts.Mode != ModeServer {
+		if opts.Device != nil {
+			e.dev = opts.Device
+		} else {
+			dev, err := CreateTUN(opts.MTU)
+			if err != nil {
+				return nil, err
+			}
+			e.dev = dev
 		}
-		e.dev = dev
 	}
 
-	if opts.Mode == ModeGateway {
+	if opts.Mode.responder() {
 		laddr, err := net.ResolveUDPAddr("udp", opts.Listen)
 		if err != nil {
 			return nil, fmt.Errorf("listen address %q: %w", opts.Listen, err)
@@ -225,7 +280,21 @@ func New(opts Options) (*Engine, error) {
 		}
 		e.conn = conn
 	}
+	if opts.Mode == ModeAgent {
+		e.agentStarted = time.Now()
+	}
+	e.localAddr = tunnelAddr(opts.TunnelCIDR)
 	return e, nil
+}
+
+// tunnelAddr extracts the address part of a tunnel CIDR ("10.77.0.1/24" ->
+// 10.77.0.1). An unparsable value yields the zero address.
+func tunnelAddr(cidr string) netip.Addr {
+	p, err := netip.ParsePrefix(cidr)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return p.Addr()
 }
 
 // PublicKey returns our static public key.
@@ -244,6 +313,12 @@ func (e *Engine) LocalAddr() string {
 	return e.conn.LocalAddr().String()
 }
 
+// TunnelCIDR returns our address on the tunnel network (as configured).
+func (e *Engine) TunnelCIDR() string { return e.opts.TunnelCIDR }
+
+// Mode returns the engine's role.
+func (e *Engine) Mode() Mode { return e.opts.Mode }
+
 // Status returns a snapshot of the engine state.
 func (e *Engine) Status() Status {
 	e.mu.Lock()
@@ -261,7 +336,7 @@ func (e *Engine) Status() Status {
 // Run starts the engine and blocks until ctx is cancelled (returns nil) or a
 // fatal setup error occurs.
 func (e *Engine) Run(ctx context.Context) error {
-	if e.opts.Mode == ModeClient {
+	if e.opts.Mode.dials() {
 		if err := e.dialWithRetry(ctx); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
@@ -269,28 +344,42 @@ func (e *Engine) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	if !e.opts.SkipNetConfig {
+	if !e.opts.SkipNetConfig && e.opts.Mode != ModeServer {
 		if err := configureInterface(e.dev, e.opts.TunnelCIDR, e.opts.Routes); err != nil {
 			return fmt.Errorf("configure interface: %w", err)
 		}
 		defer teardownInterface(e.dev, e.opts.TunnelCIDR, e.opts.Routes)
 	}
-	e.logf("%s: running (tunnel %s, mtu %d)", modeName(e.opts.Mode), e.opts.TunnelCIDR, e.opts.MTU)
+	if e.opts.Mode == ModeServer {
+		// Pick up registry peers before the first packet arrives.
+		e.reloadRegistry()
+		e.mu.Lock()
+		e.rebuildTablesLocked() // covers static peers too (tests, single-site setups)
+		routes := len(e.routes)
+		e.mu.Unlock()
+		e.logf("server: running (tunnel %s, %d route(s), relays in user space, no TUN)",
+			e.opts.TunnelCIDR, routes)
+	} else {
+		e.logf("%s: running (tunnel %s, mtu %d)", e.opts.Mode, e.opts.TunnelCIDR, e.opts.MTU)
+	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	e.mu.Lock()
 	e.cancelRun = cancel
 	e.mu.Unlock()
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		e.readLoop(runCtx)
 	}()
-	go func() {
-		defer wg.Done()
-		e.writeLoop(runCtx)
-	}()
+	if e.dev != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			e.writeLoop(runCtx)
+		}()
+	}
 	e.timerLoop(runCtx)
 	e.sendBye()
 	cancel()
@@ -338,7 +427,7 @@ func (e *Engine) readLoop(ctx context.Context) {
 		var n int
 		var addr *net.UDPAddr
 		var err error
-		if e.opts.Mode == ModeClient {
+		if e.opts.Mode.dials() {
 			n, err = conn.Read(buf)
 		} else {
 			n, addr, err = conn.ReadFromUDP(buf)
@@ -393,7 +482,7 @@ func (e *Engine) writeLoop(ctx context.Context) {
 			continue
 		}
 		if n > 0 {
-			e.sendData(buf[:n])
+			e.sendFromTun(buf[:n])
 		}
 	}
 }
@@ -438,14 +527,14 @@ func (e *Engine) tick() {
 			p.authed = false
 			p.authSentAt = time.Time{}
 			p.nextAttempt = now
-			if e.opts.Mode == ModeClient {
+			if e.opts.Mode.dials() {
 				e.redialAsyncLocked()
 			}
 		}
 
-		// Gateway: MFA session management — (re)send the challenge and give
-		// up if no valid code arrives in time.
-		if e.opts.Mode == ModeGateway && p.requiresMFA() && p.cur != nil && !p.authed {
+		// Gateway/server: MFA session management — (re)send the challenge and
+		// give up if no valid code arrives in time.
+		if e.opts.Mode.responder() && p.requiresMFA() && p.cur != nil && !p.authed {
 			switch {
 			case !now.Before(p.authDeadline):
 				e.logf("peer %s: MFA timeout, dropping session", p.cfg.Name)
@@ -460,9 +549,9 @@ func (e *Engine) tick() {
 			}
 		}
 
-		// Client: if the gateway never asks for a code (older build), proceed
-		// after a short grace period.
-		if e.opts.Mode == ModeClient && p.cur != nil && !p.authed && !p.authPrompting &&
+		// Client/agent: if the remote end never asks for a code (older build),
+		// proceed after a short grace period.
+		if e.opts.Mode.dials() && p.cur != nil && !p.authed && !p.authPrompting &&
 			p.authSentAt.IsZero() && now.Sub(p.cur.established) > authGrace {
 			p.authed = true
 			if !e.clientReady {
@@ -471,15 +560,28 @@ func (e *Engine) tick() {
 			}
 		}
 
-		// Client: a submitted code (or its result) can be lost on the wire;
-		// ask for a fresh one instead of hanging forever.
-		if e.opts.Mode == ModeClient && p.cur != nil && !p.authed && !p.authPrompting &&
+		// Client/agent: a submitted code (or its result) can be lost on the
+		// wire; ask for a fresh one instead of hanging forever.
+		if e.opts.Mode.dials() && p.cur != nil && !p.authed && !p.authPrompting &&
 			!p.authSentAt.IsZero() && now.Sub(p.authSentAt) > 8*time.Second {
 			p.authSentAt = time.Time{}
 			repromptPeer = p
 		}
 
-		if e.opts.Mode == ModeClient {
+		if e.opts.Mode == ModeAgent {
+			// Announce ourselves (identity, prefixes, liveness) right after
+			// authentication and then on a fixed interval.
+			if p.cur != nil && p.authed && now.Sub(e.announceAt) > announceInterval {
+				e.announceAt = now
+				if frame, err := sealDataFrame(p.cur.send, frameAgentInfo, p.cur.sendNonce, e.agentInfoJSONLocked()); err == nil {
+					p.cur.sendNonce++
+					p.lastSend = now
+					sends = append(sends, pending{p, frame})
+				}
+			}
+		}
+
+		if e.opts.Mode.dials() {
 			// Retry timeout for a pending handshake.
 			if p.hs != nil && now.Sub(p.hsSent) > e.opts.HandshakeRetry {
 				p.hs = nil
@@ -495,6 +597,19 @@ func (e *Engine) tick() {
 					p.attempt++
 					p.nextAttempt = now.Add(e.retryDelay(p.attempt))
 				}
+			}
+		}
+
+		// Server: keep telling a disabled agent to stand down (idempotent —
+		// also covers agents that reconnect while disabled).
+		if e.opts.Mode == ModeServer && p.cfg.Role == RoleAgent && p.cur != nil && p.authed && !p.cfg.Enabled &&
+			now.Sub(p.cmdAt) > 30*time.Second {
+			p.cmdAt = now
+			if frame, err := sealDataFrame(p.cur.send, frameAgentCmd, p.cur.sendNonce,
+				mustJSON(agentCmdMsg{Cmd: "disable", Reason: "管理员已在网页端停用该节点"})); err == nil {
+				p.cur.sendNonce++
+				p.lastSend = now
+				sends = append(sends, pending{p, frame})
 			}
 		}
 
@@ -530,14 +645,15 @@ func (e *Engine) handlePacket(addr *net.UDPAddr, frame []byte) {
 	}
 	switch typ {
 	case frameHandshakeInit:
-		if e.opts.Mode == ModeGateway {
+		if e.opts.Mode.responder() {
 			e.handleHandshakeInit(addr, payload)
 		}
 	case frameHandshakeResp:
-		if e.opts.Mode == ModeClient {
+		if e.opts.Mode.dials() {
 			e.handleHandshakeResp(payload)
 		}
-	case frameData, frameKeepalive, frameAuthChallenge, frameAuthResp, frameAuthResult, frameInfo, frameBye:
+	case frameData, frameKeepalive, frameAuthChallenge, frameAuthResp, frameAuthResult, frameInfo, frameBye,
+		frameAgentInfo, frameAgentCmd:
 		nonce, err := dataNonce(payload)
 		if err != nil {
 			return
@@ -555,12 +671,12 @@ func (e *Engine) handleHandshakeInit(addr *net.UDPAddr, payload []byte) {
 		return
 	}
 	if _, _, _, err := hs.ReadMessage(nil, payload); err != nil {
-		e.logf("gateway: rejecting handshake from %s: %v", addr, err)
+		e.logf("%s: rejecting handshake from %s: %v", e.opts.Mode, addr, err)
 		return
 	}
 	p := e.peerByPub(hs.PeerStatic())
 	if p == nil {
-		e.logf("gateway: unauthorized client %s from %s", shortKey(hs.PeerStatic()), addr)
+		e.logf("%s: unauthorized peer %s from %s (不在任何注册表里)", e.opts.Mode, shortKey(hs.PeerStatic()), addr)
 		return
 	}
 
@@ -569,12 +685,12 @@ func (e *Engine) handleHandshakeInit(addr *net.UDPAddr, payload []byte) {
 	locked := p.requiresMFA() && time.Now().Before(p.authLockedUntil)
 	e.mu.Unlock()
 	if locked {
-		e.logf("gateway: peer %s temporarily locked (MFA failures)", p.cfg.Name)
+		e.logf("%s: peer %s temporarily locked (MFA failures)", e.opts.Mode, p.cfg.Name)
 		return
 	}
 	msg2, cs1, cs2, err := hs.WriteMessage(frameHeader(frameHandshakeResp), nil)
 	if err != nil {
-		e.logf("gateway: handshake write: %v", err)
+		e.logf("%s: handshake write: %v", e.opts.Mode, err)
 		return
 	}
 
@@ -586,7 +702,7 @@ func (e *Engine) handleHandshakeInit(addr *net.UDPAddr, payload []byte) {
 	// Responder side: (cs1, cs2) = (recv, send) per the Noise spec ordering.
 	e.installSession(p, cs2, cs1)
 	e.writeWire(p, msg2)
-	e.logf("gateway: session established with %s (%s)", p.cfg.Name, addr)
+	e.logf("%s: session established with %s [%s] (%s)", e.opts.Mode, p.cfg.Name, p.cfg.Role, addr)
 
 	// MFA gating + server info (v0.2 frames; older clients ignore them).
 	e.mu.Lock()
@@ -627,7 +743,7 @@ func (e *Engine) handleHandshakeResp(payload []byte) {
 	}
 	// Initiator side: (cs1, cs2) = (send, recv) per the Noise spec ordering.
 	e.installSession(p, cs1, cs2)
-	e.logf("client: session established (%s)", p.cfg.Name)
+	e.logf("%s: session established (%s)", e.opts.Mode, p.cfg.Name)
 	e.mu.Lock()
 	// A new session starts out unauthenticated on the wire; the gateway
 	// decides (challenge frame) whether a fresh code is required.
@@ -648,7 +764,7 @@ func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
 	if addr != nil {
 		p = e.addr2peer[addr.String()]
 	}
-	if p == nil && e.opts.Mode == ModeClient {
+	if p == nil && e.opts.Mode.dials() {
 		p = e.anyPeerLocked()
 	}
 
@@ -684,7 +800,7 @@ func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
 	}
 
 	_, pt, ok := tryPeer(p)
-	if !ok && e.opts.Mode == ModeGateway {
+	if !ok && e.opts.Mode.responder() {
 		// Unknown source address, or a client whose address changed:
 		// try every configured peer.
 		for _, cand := range e.peers {
@@ -710,46 +826,95 @@ func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
 		}
 		e.addr2peer[addr.String()] = p
 	}
-	gate := e.opts.Mode == ModeGateway && p.requiresMFA() && !p.authed
+	gate := e.opts.Mode.responder() && p.requiresMFA() && !p.authed
 	e.mu.Unlock()
 
 	switch frame[1] {
 	case frameKeepalive:
 		// liveness only
 	case frameBye:
-		if e.opts.Mode == ModeGateway {
-			e.logf("peer %s: client disconnected (bye)", p.cfg.Name)
+		if e.opts.Mode.responder() {
+			e.logf("peer %s: disconnected (bye)", p.cfg.Name)
 			e.mu.Lock()
 			p.cur, p.prev = nil, nil
 			p.authed = false
 			e.mu.Unlock()
 		}
 	case frameAuthResp:
-		if e.opts.Mode == ModeGateway {
+		if e.opts.Mode.responder() {
 			e.handleAuthResp(p, pt)
 		}
 	case frameAuthChallenge:
-		if e.opts.Mode == ModeClient {
+		if e.opts.Mode.dials() {
 			e.handleAuthChallenge(p, pt)
 		}
 	case frameAuthResult:
-		if e.opts.Mode == ModeClient {
+		if e.opts.Mode.dials() {
 			e.handleAuthResult(p, pt)
 		}
 	case frameInfo:
-		if e.opts.Mode == ModeClient {
+		if e.opts.Mode.dials() {
 			e.handleInfo(p, pt)
+		}
+	case frameAgentInfo:
+		if e.opts.Mode == ModeServer {
+			e.handleAgentInfo(p, pt)
+		}
+	case frameAgentCmd:
+		if e.opts.Mode == ModeAgent {
+			e.handleAgentCmd(p, pt)
 		}
 	default: // frameData
 		if gate {
 			break // unauthenticated MFA peer: drop data until the code passes
 		}
-		if len(pt) > 0 {
-			if _, err := e.dev.Write(pt, 0); err != nil {
-				e.logf("tun write: %v", err)
-			}
+		e.deliverData(p, pt)
+	}
+}
+
+// deliverData routes one decrypted DATA payload: user-space relay on a
+// server, TUN device elsewhere (agents translate addresses first).
+func (e *Engine) deliverData(p *peerState, pkt []byte) {
+	if len(pkt) == 0 {
+		return
+	}
+	switch e.opts.Mode {
+	case ModeServer:
+		e.relayFromPeer(p, pkt)
+	case ModeAgent:
+		out, ok := e.translator.ToLocal(pkt)
+		if !ok {
+			e.dropAt("地址翻译（隧道→内网）", pkt)
+			return
+		}
+		if _, err := e.dev.Write(out, 0); err != nil {
+			e.logf("tun write: %v", err)
+		}
+	default:
+		if _, err := e.dev.Write(pkt, 0); err != nil {
+			e.logf("tun write: %v", err)
 		}
 	}
+}
+
+// sendFromTun is the TUN -> wire path: agents translate the source address
+// back into the virtual prefix and honour the forwarding gate.
+func (e *Engine) sendFromTun(pkt []byte) {
+	if len(pkt) == 0 {
+		return
+	}
+	if e.opts.Mode == ModeAgent {
+		if !e.forwarding.Load() {
+			return
+		}
+		out, ok := e.translator.ToTunnel(pkt)
+		if !ok {
+			e.dropAt("地址翻译（内网→隧道）", pkt)
+			return
+		}
+		pkt = out
+	}
+	e.sendData(pkt)
 }
 
 // ---------------------------------------------------------------- send paths
@@ -784,6 +949,27 @@ func (e *Engine) sendData(pkt []byte) {
 	}
 }
 
+// sendTo encrypts one IP packet for a single peer; used by the server relay.
+func (e *Engine) sendTo(p *peerState, pkt []byte) bool {
+	e.mu.Lock()
+	if p.cur == nil || !p.authed {
+		e.mu.Unlock()
+		return false
+	}
+	frame, err := sealDataFrame(p.cur.send, frameData, p.cur.sendNonce, pkt)
+	if err == nil {
+		p.cur.sendNonce++
+		p.lastSend = time.Now()
+	}
+	e.mu.Unlock()
+	if err != nil {
+		e.logf("seal: %v", err)
+		return false
+	}
+	e.writeWire(p, frame)
+	return true
+}
+
 // writeWire sends an already sealed frame to the peer.
 func (e *Engine) writeWire(p *peerState, frame []byte) {
 	e.mu.Lock()
@@ -795,7 +981,7 @@ func (e *Engine) writeWire(p *peerState, frame []byte) {
 		return
 	}
 	var err error
-	if e.opts.Mode == ModeClient {
+	if e.opts.Mode.dials() {
 		_, err = conn.Write(frame)
 	} else {
 		if addr == nil {

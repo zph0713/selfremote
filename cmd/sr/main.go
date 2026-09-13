@@ -40,6 +40,10 @@ func main() {
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
 	case "genkey":
 		err = cmdGenkey()
+	case "server":
+		err = cmdServer(args)
+	case "agent":
+		err = cmdAgent(args)
 	case "gateway":
 		err = cmdGateway(args)
 	case "client":
@@ -62,11 +66,15 @@ func usage() {
 	fmt.Fprint(os.Stderr, `selfremote `+version+`
 
 usage:
-  sr genkey                 generate an X25519 key pair (base64)
-  sr gateway -c <file>      run as home gateway (on the NAS)
+  sr server  -c <file>      run the hub: relays clients to site agents (no TUN needed)
+  sr agent   -c <file>      run a site edge: dials the hub, serves a LAN
+                            <file> may be an encrypted key file (.srkey)
+                            downloaded from the web UI
+  sr gateway -c <file>      run a standalone gateway (direct clients, no hub)
   sr client  -c <file>      run as client (on the Mac)
                             <file> may be an encrypted key file (.srkey)
                             downloaded from the web UI
+  sr genkey                 generate an X25519 key pair (base64)
   sr version
 `)
 }

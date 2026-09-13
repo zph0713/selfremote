@@ -6,7 +6,10 @@
 // substitute fake devices and exercise real sockets over loopback.
 package tunnel
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 // Wire format.
 const (
@@ -24,6 +27,8 @@ const (
 	frameAuthResult    = 0x08 // gateway -> client: {"ok":bool,"msg":"…"}
 	frameInfo          = 0x09 // gateway -> client: ServerInfo JSON
 	frameBye           = 0x0A // client -> gateway: clean disconnect
+	frameAgentInfo     = 0x0B // agent -> server: AgentInfo JSON (announce + heartbeat)
+	frameAgentCmd      = 0x0C // server -> agent: {"cmd":"disable|enable|kick|stat"}
 
 	frameHeaderLen = 2  // handshake frames: version + type
 	dataHeaderLen  = 10 // data frames: version + type + 8-byte nonce
@@ -46,19 +51,50 @@ const (
 
 	// tickInterval is the engine's timer granularity.
 	tickInterval = 250 * time.Millisecond
+
+	// announceInterval is how often an agent republishes its info to the
+	// server (hostname, uptime, prefixes) — its heartbeat.
+	announceInterval = 30 * time.Second
 )
 
 // Mode selects the role of an Engine.
 type Mode int
 
 const (
-	// ModeGateway runs at home (NAS) and accepts clients.
+	// ModeGateway runs at home (NAS) and accepts clients directly. This is
+	// the v0.2 standalone mode (no central server); it stays supported.
 	ModeGateway Mode = iota
-	// ModeClient runs on the Mac and connects out to the gateway.
+	// ModeClient runs on the Mac and connects out to a server or gateway.
 	ModeClient
+	// ModeAgent runs at a site edge: it dials the server, publishes its LAN
+	// prefixes and translates addresses at the tunnel boundary.
+	ModeAgent
+	// ModeServer is the hub: it accepts clients and agents on one socket and
+	// relays packets between them in user space (no TUN device).
+	ModeServer
 )
 
-// PeerConfig describes an authorized client (gateway side).
+// responder reports whether this mode accepts handshakes (listens).
+func (m Mode) responder() bool { return m == ModeGateway || m == ModeServer }
+
+// dials reports whether this mode connects out to a remote endpoint.
+func (m Mode) dials() bool { return m == ModeClient || m == ModeAgent }
+
+func (m Mode) String() string {
+	switch m {
+	case ModeGateway:
+		return "gateway"
+	case ModeClient:
+		return "client"
+	case ModeAgent:
+		return "agent"
+	case ModeServer:
+		return "server"
+	}
+	return "unknown"
+}
+
+// PeerConfig describes a peer as we know it from configuration or registry.
 type PeerConfig struct {
 	Name      string
 	User      string // owning user (web-managed registry); optional
@@ -67,15 +103,43 @@ type PeerConfig struct {
 	// TOTPSecret, when set, makes this peer require an in-tunnel MFA code
 	// (Google Authenticator style) before any data is forwarded.
 	TOTPSecret string
+
+	// ID is the stable identifier used for ACLs and control operations
+	// (agent id). Defaults to Name for legacy entries.
+	ID string
+	// Role is what this peer is from our point of view. Server mode sees both
+	// roles; other modes only ever have the zero value (client semantics).
+	Role PeerRole
+	// TunnelIP is the peer's address on the tunnel network (10.77.0.0/24).
+	// The server uses it to route return traffic to a client; for an agent it
+	// is its own tunnel address (reachable for diagnostics).
+	TunnelIP netip.Addr
+	// Routes (agents) maps the real LAN prefixes this agent serves onto the
+	// prefixes presented inside the tunnel.
+	Routes []RouteMap
+	// AllowAgents (clients) is the ACL: agent ids this client may reach.
+	// Empty means "no site" — access is denied unless granted.
+	AllowAgents []string
+	// Enabled is the operator switch for agents (registry `enabled`).
+	Enabled bool
 }
 
-// ServerInfo is reported by the gateway to clients (info frame) and shown in
-// connection status displays.
+func (pc PeerConfig) id() string {
+	if pc.ID != "" {
+		return pc.ID
+	}
+	return pc.Name
+}
+
+// ServerInfo is reported by the gateway/server to clients (info frame) and
+// shown in connection status displays.
 type ServerInfo struct {
-	Hostname   string `json:"hostname"`
-	Listen     string `json:"listen"`
-	TunnelCIDR string `json:"tunnel_cidr"`
-	MFA        bool   `json:"mfa"`
+	Hostname   string   `json:"hostname"`
+	Listen     string   `json:"listen"`
+	TunnelCIDR string   `json:"tunnel_cidr"`
+	MFA        bool     `json:"mfa"`
+	Role       string   `json:"role,omitempty"`  // "gateway" | "server"
+	Sites      []string `json:"sites,omitempty"` // server: published site prefixes
 }
 
 // Options configures an Engine.
@@ -91,14 +155,26 @@ type Options struct {
 	Listen string // e.g. "[::]:28333"
 	Peers  []PeerConfig
 
-	// ClientsFile, when set (gateway), is a hot-reloaded JSON registry of
-	// authorized clients (written by the web control plane). Peers from this
+	// ClientsFile, when set (gateway/server), is a hot-reloaded JSON registry
+	// of authorized clients (written by the web control plane). Peers from this
 	// file carry per-device MFA secrets; static Peers may then be empty.
 	ClientsFile string
 
+	// AgentsFile, when set (server), is a hot-reloaded JSON registry of site
+	// agents (agents.json, written by the web control plane).
+	AgentsFile string
+
 	// Client only.
-	Server       string // "host:port" of the gateway
-	ServerPublic []byte // gateway static public key (32 bytes)
+	Server       string // "host:port" of the gateway/server
+	ServerPublic []byte // remote static public key (32 bytes)
+
+	// Agent mode: identity published to the server, the LAN prefixes this
+	// agent serves (real↔virtual) and the TOTP secret used to answer the
+	// server's MFA challenge without a human.
+	AgentID   string
+	RouteMaps []RouteMap
+	MFASecret string
+	Version   string // reported to the server in announce frames
 
 	// Client only: called when the gateway requires an MFA code. attempt is
 	// 1-based. Returning ok=false aborts the connection.

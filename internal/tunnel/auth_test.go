@@ -297,12 +297,28 @@ func TestTOTPReplayRejected(t *testing.T) {
 		t.Fatal("lastAuthStep not recorded")
 	}
 
-	// Simulate a reconnect within the same step: the same code must be
-	// rejected (anti-replay) instead of authenticating the new session.
+	// A reconnect inside the very same time step reuses the same code (an
+	// unattended agent does exactly this); it must authenticate, not be
+	// mistaken for a replay.
 	p.authed = false
 	gw.handleAuthResp(p, payload)
+	if !p.authed {
+		t.Fatal("same-step reconnect was refused (agents could never reconnect)")
+	}
+	if p.lastAuthStep != firstStep {
+		t.Fatalf("lastAuthStep moved on a same-step re-auth: %d -> %d", firstStep, p.lastAuthStep)
+	}
+
+	// A code from an EARLIER step is the real replay: it is still inside the
+	// ±1 TOTP window, but it must never be accepted again.
+	oldCode, err := totp.GenerateCode(secret, time.Unix((firstStep-1)*30, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.authed = false
+	gw.handleAuthResp(p, []byte(fmt.Sprintf(`{"code":%q}`, oldCode)))
 	if p.authed {
-		t.Fatal("replayed code accepted")
+		t.Fatal("replayed code from a previous step accepted")
 	}
 	if p.lastAuthStep != firstStep {
 		t.Fatalf("lastAuthStep moved on a rejected code: %d -> %d", firstStep, p.lastAuthStep)

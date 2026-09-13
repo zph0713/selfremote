@@ -4,7 +4,10 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -54,12 +57,28 @@ func (e *Engine) sendSealed(p *peerState, typ byte, payload []byte) {
 // serverInfoJSON builds the info frame payload shown by clients.
 func (e *Engine) serverInfoJSON(p *peerState) []byte {
 	host, _ := os.Hostname()
-	return mustJSON(ServerInfo{
+	info := ServerInfo{
 		Hostname:   host,
 		Listen:     e.LocalAddr(),
 		TunnelCIDR: e.opts.TunnelCIDR,
 		MFA:        p.requiresMFA(),
-	})
+		Role:       e.opts.Mode.String(),
+	}
+	if e.opts.Mode == ModeServer {
+		// Tell clients which site prefixes the hub can currently serve.
+		e.mu.Lock()
+		seen := make(map[netip.Prefix]bool)
+		for _, r := range e.routes {
+			if !r.peer.cfg.Enabled || seen[r.prefix] {
+				continue
+			}
+			seen[r.prefix] = true
+			info.Sites = append(info.Sites, r.prefix.String())
+		}
+		e.mu.Unlock()
+		sort.Strings(info.Sites)
+	}
+	return mustJSON(info)
 }
 
 // checkTOTP validates a 6-digit Google Authenticator code against secret with
@@ -112,7 +131,11 @@ func (e *Engine) handleAuthResp(p *peerState, pt []byte) {
 	ok, step := checkTOTP(p.cfg.TOTPSecret, m.Code, time.Now())
 
 	e.mu.Lock()
-	pass := ok && step > p.lastAuthStep
+	// Anti-replay: a code is usable repeatedly only while it is still the
+	// current time step (an unattended agent that reconnects immediately
+	// reuses the very same code), but a step that has passed is refused — a
+	// captured code cannot be replayed later.
+	pass := ok && step >= p.lastAuthStep
 	if pass {
 		p.authed = true
 		p.lastAuthStep = step
@@ -127,16 +150,16 @@ func (e *Engine) handleAuthResp(p *peerState, pt []byte) {
 	e.mu.Unlock()
 
 	if pass {
-		e.logf("gateway: peer %s (%s): MFA passed", p.cfg.Name, p.cfg.User)
+		e.logf("%s: peer %s (%s): MFA passed", e.opts.Mode, p.cfg.Name, p.cfg.Role)
 		e.sendSealed(p, frameAuthResult, mustJSON(map[string]any{"ok": true}))
 		e.sendSealed(p, frameInfo, e.serverInfoJSON(p))
 		return
 	}
 
-	e.logf("gateway: peer %s: MFA attempt %d failed", p.cfg.Name, attempts)
+	e.logf("%s: peer %s: MFA attempt %d failed", e.opts.Mode, p.cfg.Name, attempts)
 	e.sendSealed(p, frameAuthResult, mustJSON(map[string]any{"ok": false, "msg": "验证码错误，请重试"}))
 	if attempts >= 3 {
-		e.logf("gateway: peer %s: too many MFA failures, dropping session", p.cfg.Name)
+		e.logf("%s: peer %s: too many MFA failures, dropping session", e.opts.Mode, p.cfg.Name)
 		e.mu.Lock()
 		p.cur, p.prev = nil, nil
 		p.authed = false
@@ -153,6 +176,28 @@ func (e *Engine) handleAuthChallenge(p *peerState, pt []byte) {
 	}
 	if !m.Required {
 		e.clientMarkReady(p)
+		return
+	}
+
+	if e.opts.Mode == ModeAgent {
+		// An agent runs unattended: it answers the challenge with a code
+		// derived from the TOTP secret that shipped inside its (encrypted)
+		// configuration. The server still gets a time-bound, replay-protected
+		// proof that the agent holds that secret.
+		if e.opts.MFASecret == "" {
+			e.fail(errors.New("服务端要求 MFA 动态码，但本机 agent 配置里没有 mfa_secret —— 请在网页端重新生成并下载配置文件"))
+			return
+		}
+		code, err := totp.GenerateCode(e.opts.MFASecret, time.Now())
+		if err != nil {
+			e.fail(fmt.Errorf("生成动态码失败：%w", err))
+			return
+		}
+		e.mu.Lock()
+		p.authSentAt = time.Now()
+		e.mu.Unlock()
+		e.logf("agent: 已提交本机动态码，等待服务端校验")
+		e.sendSealed(p, frameAuthResp, mustJSON(map[string]any{"code": code}))
 		return
 	}
 
