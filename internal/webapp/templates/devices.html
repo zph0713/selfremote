@@ -1,18 +1,39 @@
 {{define "content"}}
 <h1>客户端密钥</h1>
-<p><a class="btn" href="/devices/new">＋ 生成新客户端密钥</a></p>
+<p>
+  <a class="btn" href="/devices/new">＋ 生成新客户端密钥</a>
+  <span class="muted small">客户端 = 用户自己的设备（Mac / 手机 / 笔记本）；连接时用 Google Authenticator 动态码。</span>
+</p>
 {{if .Data.Devices}}
 <table>
   <tr>
     <th>名称</th>
     {{if .Data.IsAdmin}}<th>用户</th>{{end}}
-    <th>公钥</th><th>状态</th><th>创建时间</th><th></th>
+    <th>隧道地址</th>
+    <th>可访问站点</th>
+    <th>状态</th>
+    <th>创建时间</th>
+    <th></th>
   </tr>
   {{range .Data.Devices}}
   <tr>
-    <td>{{.Name}}</td>
+    <td>{{.Name}}<div class="muted small mono">{{.PublicKey}}</div></td>
     {{if $.Data.IsAdmin}}<td>{{.Username}}</td>{{end}}
-    <td class="mono">{{.PublicKey}}</td>
+    <td class="mono">{{if .TunnelIP}}{{.TunnelIP}}{{else}}<span class="muted">—</span>{{end}}</td>
+    <td>
+      <form method="post" action="/devices/sites">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <div class="codes">
+          {{range $.Data.Agents}}
+          <label class="inline small">
+            <input type="checkbox" name="sites" value="{{.AgentID}}" {{if $.Data.hasSite $ .AgentID}}checked{{end}}> {{.AgentID}}
+          </label>
+          {{end}}
+        </div>
+        <button class="linklike small">保存权限</button>
+      </form>
+    </td>
     <td>{{if index $.Data.Online .Name}}<span class="dot ok"></span>在线{{else}}<span class="muted">离线</span>{{end}}</td>
     <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
     <td>

@@ -73,6 +73,7 @@ type Server struct {
 	APIListen   string `json:"api_listen,omitempty"`   // control API for the web plane, e.g. "0.0.0.0:8770"
 	APIToken    string `json:"api_token,omitempty"`    // bearer token the web plane must present
 	StatusFile  string `json:"status_file,omitempty"`  // optional JSON snapshot (debugging)
+	NetInfoFile string `json:"netinfo_file,omitempty"` // optional host interface snapshot (web auto-detects the dial address)
 
 	// Parsed on load.
 	Private Key `json:"-"`

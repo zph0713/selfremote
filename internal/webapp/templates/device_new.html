@@ -14,7 +14,18 @@
       <label>设备名称（如 mac-air）
         <input name="name" required maxlength="64" placeholder="mac-air">
       </label>
-      <label>密钥文件密码（至少 10 位；在 Mac 上运行时需要输入它）
+      <label>可访问站点（配置里的路由 + 服务端 ACL 都按这里生成）
+        {{if .Data.Agents}}
+        <div class="codes">
+          {{range .Data.Agents}}
+          <label class="inline"><input type="checkbox" name="sites" value="{{.AgentID}}"> {{.Name}} <span class="muted small mono">{{.AgentID}} · {{range .Routes}}{{.Effective}} {{end}}</span></label>
+          {{end}}
+        </div>
+        {{else}}
+        <span class="muted small">没有可用站点——先去「站点 Agent」页添加。</span>
+        {{end}}
+      </label>
+      <label>密钥文件密码（至少 10 位；在客户端机器上运行时需要输入它）
         <input type="password" name="passphrase" required minlength="10">
       </label>
       <label>再输一次
@@ -35,7 +46,16 @@
       <label>公钥（旧设备原有配置里的 public_key / sr genkey 输出）
         <input name="public_key" required placeholder="base64…">
       </label>
-      <p class="muted small">适合把已经配好的设备直接迁移进来：不换密钥，只登记公钥。
+      <label>可访问站点
+        {{if .Data.Agents}}
+        <div class="codes">
+          {{range .Data.Agents}}
+          <label class="inline"><input type="checkbox" name="sites" value="{{.AgentID}}"> {{.Name}} <span class="muted small mono">{{.AgentID}}</span></label>
+          {{end}}
+        </div>
+        {{else}}<span class="muted small">没有可用站点。</span>{{end}}
+      </label>
+      <p class="muted small">适合把已经配好的设备迁移进来：不换密钥，只登记公钥并授予站点权限。
          连接时同样需要动态码（MFA 由账号层面控制）。</p>
       <button type="submit" {{if .Data.Problems}}disabled{{end}}>导入</button>
     </form>
@@ -45,9 +65,10 @@
   <h2>写入密钥文件的配置内容</h2>
   <table class="kv">
     <tr><td>服务端地址</td><td class="mono">{{if .Data.Server}}{{.Data.Server}}{{else}}（未就绪）{{end}}</td></tr>
-    <tr><td>走隧道的网段</td><td class="mono">{{.Data.Routes}}</td></tr>
+    <tr><td>隧道地址</td><td class="mono">自动分配（10.77.0.2–99）</td></tr>
+    <tr><td>走隧道的网段</td><td class="mono">所选站点「对内呈现」的网段</td></tr>
   </table>
-  <p class="muted small">如需修改（例如换了公网地址或网段），生成后也可用文本方式解不开——
-     直接重新生成一个即可（旧的在列表里吊销）。</p>
+  <p class="muted small">如需增减站点权限：在「客户端密钥」列表里改（服务端立即生效）；
+     但客户端路由固化在密钥文件里，新增站点后要重新生成文件。</p>
 </div>
 {{end}}

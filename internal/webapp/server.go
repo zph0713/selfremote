@@ -26,10 +26,15 @@ const Version = "0.2.2"
 type Config struct {
 	Listen     string   // e.g. ":8080"
 	DSN        string   // MariaDB DSN
-	DataDir    string   // dir shared with the gateway (clients.json / status.json / netinfo.json / gateway.json)
+	DataDir    string   // dir shared with the hub (clients.json / agents.json / netinfo.json / server.json)
 	ServerAddr string   // address embedded into generated client configs; "" = auto-detect
-	LANCIDRs   []string // home LAN subnets for generated client configs
-	TunnelPort int      // gateway UDP port (default 28333)
+	LANCIDRs   []string // legacy: home LAN subnets used when no site is selected
+	TunnelPort int      // hub UDP port (default 28333)
+
+	// v0.3: the hub's control API (status, kick, refresh).
+	ServerAPI    string // e.g. "http://server:8770"; empty = feature off
+	ServerToken  string // bearer token shared with the hub
+	AgentDistDir string // where agent binaries for deployment packages live
 }
 
 // Server is the web control plane.
@@ -51,6 +56,9 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = ":8080"
 	}
+	if cfg.AgentDistDir == "" {
+		cfg.AgentDistDir = "/agent-dist"
+	}
 	db, err := openDB(cfg.DSN)
 	if err != nil {
 		return nil, err
@@ -70,11 +78,13 @@ func (s *Server) parseTemplates() error {
 	pages := []string{
 		"login.html", "register.html", "dashboard.html", "devices.html",
 		"device_new.html", "settings.html", "recovery.html", "users.html", "error.html",
+		"agents.html", "agent_new.html", "agent_show.html",
 	}
 	funcs := template.FuncMap{
 		"human_bytes": humanBytes,
 		"since":       humanSince,
 		"v":           func() string { return Version },
+		"hasSite":     hasSite,
 	}
 	s.pages = make(map[string]*template.Template, len(pages))
 	for _, p := range pages {
@@ -114,6 +124,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /devices/new", s.authMFA(s.handleDeviceCreate))
 	mux.HandleFunc("POST /devices/import", s.authMFA(s.handleDeviceImport))
 	mux.HandleFunc("POST /devices/revoke", s.authMFA(s.handleDeviceRevoke))
+	mux.HandleFunc("POST /devices/sites", s.authMFA(s.handleDeviceSites))
+
+	mux.HandleFunc("GET /agents", s.authMFA(s.handleAgents))
+	mux.HandleFunc("GET /agents/new", s.authMFA(s.handleAgentNew))
+	mux.HandleFunc("POST /agents/new", s.authMFA(s.handleAgentCreate))
+	mux.HandleFunc("GET /agents/{id}", s.authMFA(s.handleAgentShow))
+	mux.HandleFunc("POST /agents/{id}/state", s.authMFA(s.handleAgentState))
+	mux.HandleFunc("POST /agents/{id}/kick", s.authMFA(s.handleAgentKick))
+	mux.HandleFunc("POST /agents/{id}/rotate-mfa", s.authMFA(s.handleAgentRotateMFA))
+	mux.HandleFunc("POST /agents/{id}/revoke", s.authMFA(s.handleAgentRevoke))
+	mux.HandleFunc("POST /agents/{id}/package", s.authMFA(s.handleAgentPackage))
 
 	mux.HandleFunc("GET /users", s.authAdmin(s.handleUsers))
 	mux.HandleFunc("POST /users/new", s.authAdmin(s.handleUserCreate))
@@ -284,9 +305,19 @@ func (s *Server) readJSONFile(name string, v any) (time.Time, error) {
 	return time.Now(), nil
 }
 
-// syncRegistry rewrites clients.json from the database (atomic rename), so
-// the gateway picks changes up on its next poll.
-func (s *Server) syncRegistry(ctx context.Context) error {
+// syncRegistries rewrites clients.json and agents.json from the database
+// (atomic rename), so the hub picks changes up on its next poll.
+func (s *Server) syncRegistries(ctx context.Context) error {
+	if err := s.syncClients(ctx); err != nil {
+		return err
+	}
+	return s.syncAgents(ctx)
+}
+
+// syncClients writes the client registry (what clients may connect, from
+// where, and which sites they may reach).
+func (s *Server) syncClients(ctx context.Context) error {
+	s.backfillTunnelIPs(ctx)
 	rows, err := s.registryRows(ctx)
 	if err != nil {
 		return err
@@ -298,22 +329,73 @@ func (s *Server) syncRegistry(ctx context.Context) error {
 			User:       r.Username,
 			PublicKey:  r.PublicKey,
 			TOTPSecret: r.TOTPSecret,
+			TunnelIP:   r.TunnelIP,
+			Agents:     r.Sites,
 		})
 	}
 	raw, err := json.MarshalIndent(registryFile{Clients: clients}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(s.cfg.DataDir, "clients.json.tmp")
-	final := filepath.Join(s.cfg.DataDir, "clients.json")
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := s.writeDataFile("clients.json", raw); err != nil {
 		return err
 	}
 	log.Printf("registry synced: %d client(s)", len(clients))
 	return nil
+}
+
+// syncAgents writes the agent registry (which sites the hub serves, their
+// prefixes, MFA secrets and enable switches).
+func (s *Server) syncAgents(ctx context.Context) error {
+	agents, err := s.allAgents(ctx)
+	if err != nil {
+		return err
+	}
+	out := agentRegistryFile{Agents: make([]registryAgent, 0, len(agents))}
+	for _, a := range agents {
+		routes := make([]registryAgentRoute, 0, len(a.Routes))
+		for _, r := range a.Routes {
+			routes = append(routes, registryAgentRoute{Real: r.Real, Virtual: r.Virtual})
+		}
+		out.Agents = append(out.Agents, registryAgent{
+			ID:         a.AgentID,
+			Name:       a.Name,
+			PublicKey:  a.PublicKey,
+			Enabled:    a.Enabled,
+			TOTPSecret: a.TOTPSecret,
+			TunnelIP:   a.TunnelIP,
+			Routes:     routes,
+		})
+	}
+	raw, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := s.writeDataFile("agents.json", raw); err != nil {
+		return err
+	}
+	log.Printf("agent registry synced: %d site(s)", len(out.Agents))
+	return nil
+}
+
+// writeDataFile writes one of the shared registries atomically.
+func (s *Server) writeDataFile(name string, raw []byte) error {
+	tmp := filepath.Join(s.cfg.DataDir, name+".tmp")
+	final := filepath.Join(s.cfg.DataDir, name)
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, final)
+}
+
+// hasSite reports whether a device's ACL contains an agent id (templates).
+func hasSite(sites []string, id string) bool {
+	for _, s := range sites {
+		if s == id {
+			return true
+		}
+	}
+	return false
 }
 
 func humanBytes(n uint64) string {

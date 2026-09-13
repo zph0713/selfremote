@@ -1,0 +1,44 @@
+{{define "content"}}
+<h1>添加站点 Agent</h1>
+{{if .Data.Problems}}
+<div class="flash err">
+  <b>暂时无法创建：</b>
+  <ul>{{range .Data.Problems}}<li>{{.}}</li>{{end}}</ul>
+</div>
+{{end}}
+
+<form method="post" action="/agents/new">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <div class="grid">
+    <div class="card">
+      <h2>站点信息</h2>
+      <label>名称（给自己看，如「家里 NAS」）
+        <input name="name" maxlength="64" placeholder="家里 NAS" required>
+      </label>
+      <label>Agent ID（小写字母/数字/短横线，用于权限与日志）
+        <input name="agent_id" maxlength="32" placeholder="home" required pattern="[a-z0-9-]+">
+      </label>
+      <label>站点内网网段（每行一个；多网段就多行）
+        <textarea name="routes" rows="4" required placeholder="192.168.1.0/24"></textarea>
+      </label>
+      <p class="muted small">
+        网段冲突时在行内写 <code>真实网段 =&gt; 虚拟网段</code>，例如 <code>192.168.1.0/24 =&gt; 10.200.7.0/24</code>：
+        客户端会用虚拟网段访问该站点，站点侧自动做地址翻译（两边都是 192.168.1.0/24 也能同时用）。
+        虚拟网段必须与真实网段<b>同族且前缀长度相同</b>，且不能与隧道网段 {{.Data.TunnelNet}} 冲突。
+      </p>
+    </div>
+    <div class="card">
+      <h2>已占用</h2>
+      {{if .Data.Existing}}
+      <table class="kv">
+        {{range .Data.Existing}}
+        <tr><td class="mono">{{.AgentID}}</td><td class="mono">{{range .Routes}}{{.Effective}} {{end}}</td></tr>
+        {{end}}
+      </table>
+      {{else}}<p class="muted small">还没有其他站点。</p>{{end}}
+      <p class="muted small">创建后会生成站点专属密钥和动态码密钥，并把站点写入服务端注册表。</p>
+    </div>
+  </div>
+  <p><button type="submit" {{if .Data.Problems}}disabled{{end}}>创建站点并进入部署页</button></p>
+</form>
+{{end}}

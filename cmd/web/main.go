@@ -1,7 +1,7 @@
 // Command web runs the selfremote web control plane: registration + MFA +
-// client key management + live dashboard. It talks to MariaDB and shares a
-// data directory with the gateway container (clients.json / status.json /
-// netinfo.json / gateway.json).
+// site agents + client key management + live dashboard. It talks to MariaDB,
+// shares a data directory with the hub container (clients.json / agents.json /
+// netinfo.json / server.json) and drives the hub over its control API.
 package main
 
 import (
@@ -22,10 +22,13 @@ import (
 func main() {
 	listen := flag.String("listen", envOr("LISTEN", ":8080"), "HTTP listen address")
 	dataDir := flag.String("data", envOr("DATA_DIR", "/data"), "shared data directory (clients.json etc.)")
-	serverAddr := flag.String("server-addr", envOr("SERVER_ADDR", ""), "address embedded into client configs (empty = auto-detect from netinfo)")
-	lanCIDRs := flag.String("lan-cidrs", envOr("LAN_CIDRS", "192.168.1.0/24"), "comma-separated home LAN subnets written into client configs")
-	tunnelPort := flag.Int("tunnel-port", envInt("TUNNEL_PORT", 28333), "gateway UDP port")
+	serverAddr := flag.String("server-addr", envOr("SERVER_ADDR", ""), "address embedded into client/agent configs (empty = auto-detect from netinfo)")
+	lanCIDRs := flag.String("lan-cidrs", envOr("LAN_CIDRS", "192.168.1.0/24"), "legacy: comma-separated LAN subnets (used only when a v0.2 install has no sites)")
+	tunnelPort := flag.Int("tunnel-port", envInt("TUNNEL_PORT", 28333), "hub UDP port")
 	dsn := flag.String("dsn", envOr("DB_DSN", ""), "MariaDB DSN, e.g. sr:pass@tcp(db:3306)/selfremote?parseTime=true&charset=utf8mb4")
+	srvAPI := flag.String("server-api", envOr("SRV_API_URL", ""), "hub control API base URL, e.g. http://server:8770")
+	srvToken := flag.String("server-token", envOr("SRV_API_TOKEN", ""), "bearer token for the hub control API")
+	agentDist := flag.String("agent-dist", envOr("AGENT_DIST_DIR", "/agent-dist"), "directory with agent binaries for deployment packages")
 	flag.Parse()
 
 	if *dsn == "" {
@@ -42,12 +45,15 @@ func main() {
 	defer stop()
 
 	srv, err := webapp.New(ctx, webapp.Config{
-		Listen:     *listen,
-		DSN:        *dsn,
-		DataDir:    *dataDir,
-		ServerAddr: *serverAddr,
-		LANCIDRs:   cidrs,
-		TunnelPort: *tunnelPort,
+		Listen:       *listen,
+		DSN:          *dsn,
+		DataDir:      *dataDir,
+		ServerAddr:   *serverAddr,
+		LANCIDRs:     cidrs,
+		TunnelPort:   *tunnelPort,
+		ServerAPI:    *srvAPI,
+		ServerToken:  *srvToken,
+		AgentDistDir: *agentDist,
 	})
 	if err != nil {
 		log.Fatalf("init: %v", err)

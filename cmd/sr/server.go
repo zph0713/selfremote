@@ -58,8 +58,8 @@ func cmdServer(args []string) error {
 		}
 	}()
 
-	if cfg.StatusFile != "" {
-		go runServerStatusWriter(ctx, api, cfg.StatusFile)
+	if cfg.StatusFile != "" || cfg.NetInfoFile != "" {
+		go runServerStatusWriter(ctx, api, cfg.StatusFile, cfg.NetInfoFile)
 	}
 
 	fmt.Printf("selfremote server %s\n", version)

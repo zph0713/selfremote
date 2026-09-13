@@ -62,6 +62,26 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, u *User
 			devs = all
 		}
 	}
+	var agents []Agent
+	if u.IsAdmin {
+		agents, _ = s.allAgents(ctx)
+	} else {
+		agents, _ = s.agentsByUser(ctx, u.ID)
+	}
+
+	// Live state comes from the hub's control API; the files above stay as a
+	// fallback for a standalone gateway (v0.2 installs).
+	hub := s.hubView(ctx)
+	liveAgents := make([]agentRow, 0, len(agents))
+	for i := range agents {
+		a := agents[i]
+		live := agentState(&a, hub.AgentByID[a.AgentID], hub.Reachable, a.Enabled)
+		var routes []string
+		for _, rt := range a.Routes {
+			routes = append(routes, rt.Effective())
+		}
+		liveAgents = append(liveAgents, agentRow{Agent: a, Live: live, Routes: routes})
+	}
 
 	statusAge := ""
 	if !statusAt.IsZero() {
@@ -75,13 +95,17 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, u *User
 		Title:       "总览",
 		AutoRefresh: true,
 		Data: map[string]any{
-			"Status":     st,
-			"StatusAge":  statusAge,
-			"Net":        ni,
-			"NetAge":     netAge,
-			"ServerAddr": s.serverAddr(),
-			"Devices":    len(devs),
-			"IsAdmin":    u.IsAdmin,
+			"Status":      st,
+			"StatusAge":   statusAge,
+			"Net":         ni,
+			"NetAge":      netAge,
+			"ServerAddr":  s.serverAddr(),
+			"Devices":     len(devs),
+			"Agents":      liveAgents,
+			"Hub":         hub.Status,
+			"HubUp":       hub.Reachable,
+			"IsAdmin":     u.IsAdmin,
+			"RelayLayout": true,
 		},
 	})
 }

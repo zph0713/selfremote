@@ -5,7 +5,9 @@ package webapp
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -32,6 +34,41 @@ type Device struct {
 	Enabled   bool
 	CreatedAt time.Time
 	Username  string // joined for admin views
+
+	// v0.3: the device's address on the tunnel network and the sites it may
+	// reach (agent slugs). Both land in clients.json, which the hub enforces.
+	TunnelIP string
+	Sites    []string
+}
+
+// AgentRoute is one prefix a site agent serves.
+type AgentRoute struct {
+	Real    string `json:"real"`
+	Virtual string `json:"virtual,omitempty"`
+}
+
+// Effective is the prefix clients address (the virtual one; identity when the
+// agent did not need a remap).
+func (r AgentRoute) Effective() string {
+	if r.Virtual != "" {
+		return r.Virtual
+	}
+	return r.Real
+}
+
+// Agent is one site edge registered in the control plane.
+type Agent struct {
+	ID         int64
+	UserID     int64
+	AgentID    string // slug used in ACLs and the agent registry
+	Name       string
+	PublicKey  string // base64
+	TunnelIP   string // its own address on the tunnel network
+	TOTPSecret string
+	Enabled    bool
+	Routes     []AgentRoute
+	CreatedAt  time.Time
+	Username   string
 }
 
 // Session is a web login session.
@@ -42,12 +79,14 @@ type Session struct {
 	ExpiresAt time.Time
 }
 
-// RegistryRow is what the gateway needs to know about one device.
+// RegistryRow is what the hub needs to know about one device.
 type RegistryRow struct {
 	DeviceName string
 	Username   string
 	PublicKey  string
 	TOTPSecret string
+	TunnelIP   string
+	Sites      []string
 }
 
 const schema = `
@@ -87,6 +126,23 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at DATETIME NOT NULL,
   KEY idx_expires (expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS agents (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT NOT NULL,
+  agent_id VARCHAR(64) NOT NULL UNIQUE,
+  name VARCHAR(64) NOT NULL,
+  public_key VARCHAR(64) NOT NULL UNIQUE,
+  tunnel_ip VARCHAR(45) NOT NULL DEFAULT '',
+  totp_secret VARCHAR(64) NOT NULL DEFAULT '',
+  enabled TINYINT NOT NULL DEFAULT 1,
+  routes_json TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS tunnel_ip VARCHAR(45) NOT NULL DEFAULT '';
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS agents_json TEXT NULL;
 `
 
 func openDB(dsn string) (*sql.DB, error) {
@@ -268,7 +324,7 @@ func (s *Server) useRecoveryCode(ctx context.Context, userID int64, hash string)
 
 // ---------------------------------------------------------------- devices
 
-const deviceCols = `d.id, d.user_id, d.name, d.public_key, d.enabled, d.created_at, u.username`
+const deviceCols = `d.id, d.user_id, d.name, d.public_key, d.enabled, d.created_at, d.tunnel_ip, d.agents_json, u.username`
 
 func scanDevices(rows *sql.Rows) ([]Device, error) {
 	defer rows.Close()
@@ -276,13 +332,38 @@ func scanDevices(rows *sql.Rows) ([]Device, error) {
 	for rows.Next() {
 		var d Device
 		var enabled int
-		if err := rows.Scan(&d.ID, &d.UserID, &d.Name, &d.PublicKey, &enabled, &d.CreatedAt, &d.Username); err != nil {
+		var agentsJSON sql.NullString
+		if err := rows.Scan(&d.ID, &d.UserID, &d.Name, &d.PublicKey, &enabled, &d.CreatedAt,
+			&d.TunnelIP, &agentsJSON, &d.Username); err != nil {
 			return nil, err
 		}
 		d.Enabled = enabled != 0
+		d.Sites = decodeSites(agentsJSON.String)
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+func decodeSites(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeSites(sites []string) string {
+	if len(sites) == 0 {
+		return "[]"
+	}
+	raw, err := json.Marshal(sites)
+	if err != nil {
+		return "[]"
+	}
+	return string(raw)
 }
 
 func (s *Server) devicesByUser(ctx context.Context, userID int64) ([]Device, error) {
@@ -317,10 +398,20 @@ func (s *Server) deviceByID(ctx context.Context, id int64) (*Device, error) {
 	return &devs[0], nil
 }
 
-func (s *Server) addDevice(ctx context.Context, userID int64, name, publicKey string) error {
+func (s *Server) addDevice(ctx context.Context, userID int64, name, publicKey, tunnelIP string, sites []string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO devices (user_id, name, public_key) VALUES (?, ?, ?)`,
-		userID, name, publicKey)
+		`INSERT INTO devices (user_id, name, public_key, tunnel_ip, agents_json) VALUES (?, ?, ?, ?, ?)`,
+		userID, name, publicKey, tunnelIP, encodeSites(sites))
+	return err
+}
+
+func (s *Server) setDeviceSites(ctx context.Context, id int64, sites []string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE devices SET agents_json = ? WHERE id = ?`, encodeSites(sites), id)
+	return err
+}
+
+func (s *Server) setDeviceTunnelIP(ctx context.Context, id int64, ip string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE devices SET tunnel_ip = ? WHERE id = ?`, ip, id)
 	return err
 }
 
@@ -330,10 +421,10 @@ func (s *Server) deleteDevice(ctx context.Context, id int64) error {
 }
 
 // registryRows returns every enabled device whose owner has MFA bound — the
-// exact set the gateway is allowed to accept.
+// exact set the hub is allowed to accept.
 func (s *Server) registryRows(ctx context.Context) ([]RegistryRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT d.name, u.username, d.public_key, u.totp_secret
+		SELECT d.name, u.username, d.public_key, u.totp_secret, d.tunnel_ip, d.agents_json
 		FROM devices d JOIN users u ON u.id = d.user_id
 		WHERE d.enabled = 1 AND u.totp_enabled = 1
 		ORDER BY d.id`)
@@ -344,10 +435,119 @@ func (s *Server) registryRows(ctx context.Context) ([]RegistryRow, error) {
 	var out []RegistryRow
 	for rows.Next() {
 		var r RegistryRow
-		if err := rows.Scan(&r.DeviceName, &r.Username, &r.PublicKey, &r.TOTPSecret); err != nil {
+		var agentsJSON sql.NullString
+		if err := rows.Scan(&r.DeviceName, &r.Username, &r.PublicKey, &r.TOTPSecret,
+			&r.TunnelIP, &agentsJSON); err != nil {
 			return nil, err
 		}
+		r.Sites = decodeSites(agentsJSON.String)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------- agents
+
+const agentCols = `a.id, a.user_id, a.agent_id, a.name, a.public_key, a.tunnel_ip, a.totp_secret, a.enabled, a.routes_json, a.created_at, u.username`
+
+func scanAgents(rows *sql.Rows) ([]Agent, error) {
+	defer rows.Close()
+	var out []Agent
+	for rows.Next() {
+		var a Agent
+		var enabled int
+		var routesJSON string
+		if err := rows.Scan(&a.ID, &a.UserID, &a.AgentID, &a.Name, &a.PublicKey, &a.TunnelIP,
+			&a.TOTPSecret, &enabled, &routesJSON, &a.CreatedAt, &a.Username); err != nil {
+			return nil, err
+		}
+		a.Enabled = enabled != 0
+		if err := json.Unmarshal([]byte(routesJSON), &a.Routes); err != nil {
+			return nil, fmt.Errorf("agent %s: routes: %w", a.AgentID, err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Server) allAgents(ctx context.Context) ([]Agent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+agentCols+` FROM agents a JOIN users u ON u.id = a.user_id ORDER BY a.agent_id`)
+	if err != nil {
+		return nil, err
+	}
+	return scanAgents(rows)
+}
+
+func (s *Server) agentsByUser(ctx context.Context, userID int64) ([]Agent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+agentCols+` FROM agents a JOIN users u ON u.id = a.user_id WHERE a.user_id = ? ORDER BY a.agent_id`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	return scanAgents(rows)
+}
+
+func (s *Server) agentByAgentID(ctx context.Context, agentID string) (*Agent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+agentCols+` FROM agents a JOIN users u ON u.id = a.user_id WHERE a.agent_id = ?`, agentID)
+	if err != nil {
+		return nil, err
+	}
+	as, err := scanAgents(rows)
+	if err != nil || len(as) == 0 {
+		return nil, err
+	}
+	return &as[0], nil
+}
+
+func (s *Server) agentByDBID(ctx context.Context, id int64) (*Agent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+agentCols+` FROM agents a JOIN users u ON u.id = a.user_id WHERE a.id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	as, err := scanAgents(rows)
+	if err != nil || len(as) == 0 {
+		return nil, err
+	}
+	return &as[0], nil
+}
+
+func (s *Server) addAgent(ctx context.Context, a *Agent) error {
+	routes, err := json.Marshal(a.Routes)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO agents (user_id, agent_id, name, public_key, tunnel_ip, totp_secret, enabled, routes_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.UserID, a.AgentID, a.Name, a.PublicKey, a.TunnelIP, a.TOTPSecret, boolInt(a.Enabled), string(routes))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Server) setAgentEnabled(ctx context.Context, id int64, enabled bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET enabled = ? WHERE id = ?`, boolInt(enabled), id)
+	return err
+}
+
+func (s *Server) setAgentTOTP(ctx context.Context, id int64, secret string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET totp_secret = ? WHERE id = ?`, secret, id)
+	return err
+}
+
+func (s *Server) deleteAgent(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM agents WHERE id = ?`, id)
+	return err
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

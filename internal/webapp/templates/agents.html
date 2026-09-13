@@ -1,0 +1,72 @@
+{{define "content"}}
+<h1>站点 Agent</h1>
+<p>
+  <a class="btn" href="/agents/new">＋ 添加站点</a>
+  <span class="muted small">站点 = 一台能访问目标内网的机器（家里 NAS、公司服务器、朋友的树莓派…）。它主动拨号接入服务端，因此不需要公网 IP 或端口映射。</span>
+</p>
+
+{{if not .Data.HubReachable}}
+<div class="flash err">控制面暂时读不到中转服务端（<code>SRV_API_URL</code> 未配置或服务端未运行）：下面的状态仅供参考，启停/踢线也会失败。</div>
+{{end}}
+{{range .Data.Conflicts}}
+<div class="flash err">网段冲突：{{.}}</div>
+{{end}}
+
+{{if .Data.Agents}}
+<table>
+  <tr>
+    <th>站点</th>
+    <th>状态</th>
+    <th>站点网段（对内呈现）</th>
+    <th>隧道地址</th>
+    <th>流量 ↓ / ↑</th>
+    <th>最后上报</th>
+    <th></th>
+  </tr>
+  {{range .Data.Agents}}
+  <tr>
+    <td>
+      <a href="/agents/{{.AgentID}}">{{.Name}}</a>
+      <div class="muted small mono">{{.AgentID}}{{if .Live.Hostname}} · {{.Live.Hostname}}{{end}}{{if .Live.Version}} · v{{.Live.Version}}{{end}}</div>
+    </td>
+    <td>
+      {{if eq .Live.State "在线"}}<span class="dot ok"></span>{{.Live.State}}
+      {{else if eq .Live.State "认证中"}}<span class="dot warn"></span>{{.Live.State}}
+      {{else if eq .Live.State "已停用"}}<span class="dot muted"></span>{{.Live.State}}
+      {{else}}<span class="dot muted"></span>{{.Live.State}}{{end}}
+      {{if .Live.Mismatch}}<div class="small" style="color:#b45309">配置不一致</div>{{end}}
+    </td>
+    <td class="mono">{{if .Routes}}{{range .Routes}}<div>{{.}}</div>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="mono">{{.TunnelIP}}</td>
+    <td>{{human_bytes .Live.RxBytes}} / {{human_bytes .Live.TxBytes}}</td>
+    <td>{{since .Live.LastSeen}}</td>
+    <td>
+      <a class="btn" href="/agents/{{.AgentID}}">详情</a>
+      <form method="post" action="/agents/{{.AgentID}}/state" class="inline">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        {{if .Enabled}}
+        <input type="hidden" name="enabled" value="0">
+        <button class="linklike">停用</button>
+        {{else}}
+        <input type="hidden" name="enabled" value="1">
+        <button class="linklike">启用</button>
+        {{end}}
+      </form>
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p class="muted">还没有站点。点「添加站点」创建第一个：填好名称和站点内网网段后，下载部署包放到那台机器上运行即可。</p>
+{{end}}
+
+<div class="card">
+  <h2>它是怎么工作的</h2>
+  <p class="muted small">
+    客户端只连接<b>中转服务端</b>，服务端按「站点网段」把流量交给对应站点；站点把包送进自己的内网并做源地址改写。
+    因此：客户端配置里只需要<b>站点对内呈现的网段</b>，不用知道站点在哪、有没有公网地址。
+    多个站点网段相同（例如都是 192.168.1.0/24）时，给其中一个填一个虚拟网段（如 <code>192.168.1.0/24 => 10.200.7.0/24</code>），
+    站点侧会自动做地址翻译。
+  </p>
+</div>
+{{end}}

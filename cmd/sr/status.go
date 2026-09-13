@@ -14,6 +14,32 @@ import (
 	"selfremote/internal/tunnel"
 )
 
+// netInfoSnapshot collects the host's interfaces (published for the web UI so
+// it can auto-detect the address clients should dial).
+func netInfoSnapshot() netInfoJSON {
+	host, _ := os.Hostname()
+	out := netInfoJSON{
+		UpdatedAt:  time.Now().Format(time.RFC3339),
+		Hostname:   host,
+		Interfaces: []ifaceInfo{},
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifaces {
+		entry := ifaceInfo{Name: ifc.Name, Up: ifc.Flags&net.FlagUp != 0}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			entry.Addresses = append(entry.Addresses, a.String())
+		}
+		sort.Strings(entry.Addresses)
+		out.Interfaces = append(out.Interfaces, entry)
+	}
+	sort.Slice(out.Interfaces, func(i, j int) bool { return out.Interfaces[i].Name < out.Interfaces[j].Name })
+	return out
+}
+
 // runStatusWriter publishes live gateway state for the web control plane:
 //
 //   - status file:  sessions / bytes / MFA state — every 3 s
@@ -62,28 +88,7 @@ func runStatusWriter(ctx context.Context, eng *tunnel.Engine, statusFile, netInf
 		if netInfoFile == "" {
 			return
 		}
-		host, _ := os.Hostname()
-		ifaces, err := net.Interfaces()
-		if err != nil {
-			log.Printf("netinfo writer: %v", err)
-			return
-		}
-		out := netInfoJSON{
-			UpdatedAt:  time.Now().Format(time.RFC3339),
-			Hostname:   host,
-			Interfaces: make([]ifaceInfo, 0, len(ifaces)),
-		}
-		for _, ifc := range ifaces {
-			entry := ifaceInfo{Name: ifc.Name, Up: ifc.Flags&net.FlagUp != 0}
-			addrs, _ := ifc.Addrs()
-			for _, a := range addrs {
-				entry.Addresses = append(entry.Addresses, a.String())
-			}
-			sort.Strings(entry.Addresses)
-			out.Interfaces = append(out.Interfaces, entry)
-		}
-		sort.Slice(out.Interfaces, func(i, j int) bool { return out.Interfaces[i].Name < out.Interfaces[j].Name })
-		if err := atomicWriteJSON(netInfoFile, out); err != nil {
+		if err := atomicWriteJSON(netInfoFile, netInfoSnapshot()); err != nil {
 			log.Printf("netinfo writer: %v", err)
 		}
 	}
@@ -102,23 +107,40 @@ func runStatusWriter(ctx context.Context, eng *tunnel.Engine, statusFile, netInf
 	}
 }
 
-// runServerStatusWriter publishes the hub snapshot to a JSON file (debugging
-// and CLI tooling; the web control plane uses the control API instead).
-func runServerStatusWriter(ctx context.Context, api *serverapp.Server, path string) {
+// runServerStatusWriter publishes the hub snapshot to a JSON file, plus the
+// host's network info every 30 s (the web UI auto-detects the address clients
+// should dial from it, and the status file stays handy for debugging).
+func runServerStatusWriter(ctx context.Context, api *serverapp.Server, path, netInfoPath string) {
 	t := time.NewTicker(3 * time.Second)
+	infoT := time.NewTicker(30 * time.Second)
 	defer t.Stop()
+	defer infoT.Stop()
 	write := func() {
+		if path == "" {
+			return
+		}
 		if err := atomicWriteJSON(path, api.Snapshot()); err != nil {
 			log.Printf("status writer: %v", err)
 		}
 	}
+	writeNetInfo := func() {
+		if netInfoPath == "" {
+			return
+		}
+		if err := atomicWriteJSON(netInfoPath, netInfoSnapshot()); err != nil {
+			log.Printf("netinfo writer: %v", err)
+		}
+	}
 	write()
+	writeNetInfo()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			write()
+		case <-infoT.C:
+			writeNetInfo()
 		}
 	}
 }

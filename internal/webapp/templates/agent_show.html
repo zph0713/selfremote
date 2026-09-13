@@ -1,0 +1,115 @@
+{{define "content"}}
+<h1>站点 {{.Data.Agent.Name}}</h1>
+<p class="muted small mono">
+  {{.Data.Agent.AgentID}} · 隧道地址 {{.Data.Agent.TunnelIP}} · 归属 {{.Data.Agent.Username}}
+  · 公钥 {{.Data.Agent.PublicKey}}
+</p>
+
+{{if not .Data.HubReachable}}
+<div class="flash err">控制面读不到中转服务端（<code>SRV_API_URL</code> 未配置或服务端未运行）：启停/踢线不可用。</div>
+{{end}}
+{{if .Data.KeyProblem}}
+<div class="flash err">{{.Data.KeyProblem}}</div>
+{{end}}
+
+<div class="grid">
+  <div class="card">
+    <h2>实时状态</h2>
+    <table class="kv">
+      <tr><td>状态</td><td>
+        {{if eq .Data.Live.State "在线"}}<span class="dot ok"></span>在线{{else if eq .Data.Live.State "认证中"}}<span class="dot warn"></span>认证中{{else if eq .Data.Live.State "已停用"}}<span class="dot muted"></span>已停用{{else}}<span class="dot muted"></span>{{.Data.Live.State}}{{end}}
+        {{if .Data.Live.Mismatch}}<span class="small" style="color:#b45309">（上报网段与注册表不一致）</span>{{end}}
+      </td></tr>
+      <tr><td>主机 / 版本</td><td>{{if .Data.Live.Hostname}}{{.Data.Live.Hostname}}{{else}}<span class="muted">—</span>{{end}}{{if .Data.Live.Version}} · v{{.Data.Live.Version}}{{end}}</td></tr>
+      <tr><td>转发</td><td>{{if .Data.Live.Serving}}<span class="dot ok"></span>开启{{else}}<span class="dot warn"></span>已暂停{{end}}</td></tr>
+      <tr><td>运行时长</td><td>{{if .Data.Live.UptimeS}}{{.Data.Live.UptimeS}} 秒{{else}}<span class="muted">—</span>{{end}}</td></tr>
+      <tr><td>来源地址</td><td class="mono">{{if .Data.Live.Remote}}{{.Data.Live.Remote}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
+      <tr><td>最后上报</td><td>{{since .Data.Live.LastSeen}}</td></tr>
+      <tr><td>流量 ↓ / ↑</td><td>{{human_bytes .Data.Live.RxBytes}} / {{human_bytes .Data.Live.TxBytes}}</td></tr>
+    </table>
+    <p>
+      <form method="post" action="/agents/{{.Data.Agent.AgentID}}/kick" class="inline">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <button {{if not .Data.HubReachable}}disabled{{end}}>踢线重连</button>
+      </form>
+      <form method="post" action="/agents/{{.Data.Agent.AgentID}}/state" class="inline">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        {{if .Data.Agent.Enabled}}
+        <input type="hidden" name="enabled" value="0">
+        <button {{if not .Data.HubReachable}}disabled{{end}}>停用站点</button>
+        {{else}}
+        <input type="hidden" name="enabled" value="1">
+        <button {{if not .Data.HubReachable}}disabled{{end}}>启用站点</button>
+        {{end}}
+      </form>
+    </p>
+    <p class="muted small">
+      停用 = 服务端立即拒绝该站点流量并通知站点暂停转发（站点进程继续心跳，无需登录站点机器）；
+      启用 = 立即恢复。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>站点网段</h2>
+    <table class="kv">
+      {{range .Data.Agent.Routes}}
+      <tr>
+        <td class="mono">{{.Real}}</td>
+        <td class="mono">{{if .Virtual}}对客户端呈现为 <b>{{.Virtual}}</b>{{else}}原样呈现{{end}}</td>
+      </tr>
+      {{end}}
+    </table>
+    <p class="muted small">客户端配置里的路由必须写「对客户端呈现」的那一列。改网段需要删掉站点重建（会换密钥）。</p>
+  </div>
+</div>
+
+<div class="card">
+  <h2>部署</h2>
+  {{if .Data.DistReady}}
+  <form method="post" action="/agents/{{.Data.Agent.AgentID}}/package">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <div class="grid">
+      <label>目标平台
+        <select name="platform">
+          {{range .Data.Platforms}}{{if .OK}}<option value="{{.Key}}">{{.Label}}</option>{{end}}{{end}}
+        </select>
+      </label>
+      <label>配置文件密码（至少 10 位，部署时在站点机器上输入）
+        <input type="password" name="passphrase" minlength="10" required>
+      </label>
+    </div>
+    <p><button type="submit">生成并下载部署包（zip）</button></p>
+    <p class="muted small">
+      包里含 agent 二进制、加密配置文件（<code>{{.Data.Agent.AgentID}}.srkey</code>，内含站点私钥与动态码密钥）和中文部署说明。
+      <b>每次下载都会换一对新密钥</b>：旧包在其后即失效，请在站点上替换。
+    </p>
+  </form>
+  {{else}}
+  <p class="muted small">当前控制面镜像里没有 agent 二进制（<code>{{.Data.Agent.AgentID}}</code> 需要自行编译）。
+     可用源码构建：<code>go build ./cmd/sr</code>，然后在站点机器上执行
+     <code>sr agent -c agent.srkey</code>；配置文件可以联系管理员单独生成。</p>
+  {{end}}
+  <h3>部署三步</h3>
+  <ol class="muted small">
+    <li>把 zip 拷到站点机器（NAS / 服务器 / 树莓派…）并解压；</li>
+    <li>按包里的 <code>README.txt</code> 运行（容器方式最省事：镜像自带转发与 SNAT 配置）；</li>
+    <li>回到本页看状态变成「在线」——站点上报的网段应与上面一致。</li>
+  </ol>
+  <p class="muted small">服务端地址：<code>{{.Data.Server}}</code>（agent 只需要能出站 UDP 到这个地址）。</p>
+</div>
+
+<div class="card">
+  <h2>危险操作</h2>
+  <form method="post" action="/agents/{{.Data.Agent.AgentID}}/rotate-mfa" class="inline"
+        onsubmit="return confirm('轮换动态码密钥？站点当前会话会在下次重连时失效，必须重新下载部署包并替换站点配置。')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button>轮换动态码密钥</button>
+  </form>
+  <form method="post" action="/agents/{{.Data.Agent.AgentID}}/revoke" class="inline"
+        onsubmit="return confirm('删除该站点？在线会话会在数秒内断开，站点上的 agent 将无法再连入。')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="danger">删除站点</button>
+  </form>
+  <p class="muted small">删除是「先断联、后清理」：服务端立即把它移出注册表并拒绝握手。</p>
+</div>
+{{end}}
