@@ -50,6 +50,8 @@ func main() {
 		err = cmdGateway(args)
 	case "client":
 		err = cmdClient(args)
+	case "socks":
+		err = cmdSocks(args)
 	case "version", "-v", "--version":
 		fmt.Println("selfremote", version)
 	case "help", "-h", "--help":
@@ -78,6 +80,8 @@ usage:
   sr client  -c <file>      run as client (on the Mac)
                             <file> may be an encrypted key file (.srkey)
                             downloaded from the web UI
+  sr socks   -c <file>      local SOCKS5/HTTP proxy over the tunnel (no root,
+                            no tun, no route changes); TCP only for now
   sr genkey                 generate an X25519 key pair (base64)
   sr pubkey  -c <file>      print the public key of a config file
   sr version
