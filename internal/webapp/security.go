@@ -51,27 +51,38 @@ func refererOrigin(ref string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// sameOriginHost 比较 origin 与请求 Host（忽略 scheme 差异与默认端口）。
+// sameOriginHost 比较 origin 与请求 Host。
+//
+// 端口只在两边都写了的时候才比较：反向代理（nginx 的 $host）可能把端口丢掉，
+// 而浏览器一定带端口 —— 只比主机名已经足够挡住跨站，少一层误伤。
 func sameOriginHost(origin, host string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return canonicalHost(u.Host) == canonicalHost(host)
+	oh, op := splitHostPort(u.Host)
+	rh, rp := splitHostPort(host)
+	if oh != rh {
+		return false
+	}
+	if op != "" && rp != "" && op != rp {
+		return false
+	}
+	return true
 }
 
-func canonicalHost(h string) string {
-	host, port, err := net.SplitHostPort(h)
-	if err != nil {
+func splitHostPort(h string) (host, port string) {
+	if hp, p, err := net.SplitHostPort(h); err == nil {
+		host, port = hp, p
+	} else {
 		host = h
-		port = ""
 	}
 	host = strings.ToLower(strings.Trim(host, "[]"))
-	// 默认端口归一
-	if (port == "80" && true) || (port == "443" && true) || port == "" {
-		return host
+	// 80/443 视为「无端口」
+	if port == "80" || port == "443" {
+		port = ""
 	}
-	return host + ":" + port
+	return host, port
 }
 
 func (s *Server) logf(r *http.Request, format string, args ...any) {
