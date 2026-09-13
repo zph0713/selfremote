@@ -44,8 +44,31 @@
 | 方式 | 适用 | 做法 |
 |---|---|---|
 | **A. 从 ghcr.io 直接拉**（最省事） | NAS 能访问 ghcr.io | 第 5 步启动项目时自动拉；也可以 SSH `sudo docker pull ghcr.io/zph0713/selfremote:v0.4.0 && sudo docker pull ghcr.io/zph0713/selfremote-web:v0.4.0` |
-| **B. 离线镜像包**（网络不通/很慢） | 国内网络拉不动 ghcr | 在开发机下载 Release 里的 `selfremote-image-linux-amd64.tar.gz` 与 `selfremote-web-image-linux-amd64.tar.gz` → 上传 NAS → Container Manager → **映像 → 新增 → 从文件添加**（或 SSH `gunzip -c x.tar.gz \| sudo docker load`） |
+| **B. 离线镜像包**（网络不通/很慢） | 国内网络拉不动 ghcr | 见下方「离线导入三步」 |
 | **C. 自建镜像** | 你自己改了代码 | 开发机 `bash scripts/build-agent-dist.sh` + `docker build` 两个 Dockerfile → `docker save` → 上传 → 导入（同 B） |
+
+**离线导入三步**（DS1821+ 是 x86_64，下 amd64 包即可）：
+
+```bash
+# ① 开发机下载 Release 资产（v0.4.0）：
+#    selfremote-image-linux-amd64.tar.gz 与 selfremote-web-image-linux-amd64.tar.gz
+#    用 File Station 传到 NAS，比如 /volume1/docker/
+
+# ② NAS 上导入（注意：包里的镜像名是 xxx:release，要重新打 tag 成 compose 认的名字）
+cd /volume1/docker/selfremote
+sudo gunzip -c /volume1/docker/selfremote-image-linux-amd64.tar.gz     | sudo docker load
+sudo gunzip -c /volume1/docker/selfremote-web-image-linux-amd64.tar.gz | sudo docker load
+sudo docker tag selfremote:release     ghcr.io/zph0713/selfremote:v0.4.0
+sudo docker tag selfremote:release     ghcr.io/zph0713/selfremote:latest
+sudo docker tag selfremote-web:release ghcr.io/zph0713/selfremote-web:v0.4.0
+sudo docker tag selfremote-web:release ghcr.io/zph0713/selfremote-web:latest
+
+# ③ 确认四个名字都在（第 4 步 init.sh 和第 5 步启动都用得上）
+sudo docker images | grep -E 'selfremote|mariadb|nginx'
+```
+
+> 也能用图形界面：Container Manager → **映像** → 新增 → 从文件添加（导入 tar 后还需要
+> 在「映像」里手动重命名/打标签，比 SSH 麻烦，不推荐）。
 
 镜像名要对得上 `.env` 里的 `SR_IMAGE` / `SR_WEB_IMAGE`（默认就是官方镜像名）。
 
@@ -194,6 +217,7 @@ curl -fsSL http://192.168.2.243:8080/install.sh | sudo bash -s -- --code XXXX-XX
 | 拉镜像超时 / TLS handshake timeout | 国内直连 ghcr 不稳 → 走第 2 步的**离线镜像包**；或在 DSM 控制面板 → 网络 → 代理服务器里配代理后重启 Container Manager |
 | 「项目」里看不到「使用现有的 docker-compose.yml」 | 路径选错了（要选到 `/volume1/docker/selfremote` 这一层，里面有 docker-compose.yml） |
 | `agent-home` 一直重启 | 看日志：多半是 `data/agent-home.json` 不存在（init.sh 没跑成，或 `SR_CONFIG_DIR` 与 init.sh 的路径不一致） |
+| `agent-home` 报 `/dev/net/tun` 相关错误 | 群晖默认有此设备；若真报错，在 Container Manager → 项目 → 编辑里勾选**「使用高权限执行容器」**（compose 里已声明 `cap_add: NET_ADMIN/NET_RAW` 与 devices） |
 | 站点显示离线 | `sudo docker compose logs --tail=50 agent-home`；它在容器里连 `127.0.0.1:28333`（host 网络），server 没起来就起不来 |
 | 开了 Open vSwitch 的机型 | 不用改配置：转发/SNAT 规则是按「除隧道口 sr0 外的任何出口」生效的，`SR_LAN_IF` 只影响日志提示 |
 | 客户端连不上、但网页正常 | UDP 28333 没通：路由器转发 `/ DSM 防火墙 / 运营商`。先在家用手机流量测 `[公网IPv6]:28333` — UDP 没有握手包，直接看客户端日志有没有 `session established` |
