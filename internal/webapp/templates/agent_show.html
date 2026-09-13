@@ -22,7 +22,12 @@
     在<b>要接入的机器上</b>（root）执行下面这一行即可：下载 agent、用安装码换注册（现场生成密钥）、装成开机自启的服务。
     安装码是一次性的，有效期 <b>{{.Data.CodeTTL}}</b>{{if not .Data.CodeValid}}（已过期，点下面的「生成新安装码」）{{end}}。
   </p>
-  {{if .Data.InstallCmd}}
+  {{if not .Data.CodeValid}}
+  <div class="flash warn">
+    该站点已经接入过了（或安装码已过期/被用过）。要给另一台机器接入、或者换机重装，
+    点下面的「生成新安装码」即可 —— 新码生成后，之前那台机器上的 agent 会立即失效。
+  </div>
+  {{else if .Data.InstallCmd}}
   <label>安装命令（Linux 直接跑 / macOS 同样可用）
     <input class="mono" type="text" readonly value="{{.Data.InstallCmd}}" onclick="this.select()">
   </label>
