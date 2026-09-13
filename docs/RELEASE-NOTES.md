@@ -39,6 +39,35 @@ curl -fsSL http://<控制面>:8080/install.sh | sudo bash -s -- --code XXXX-XXXX
 
 建站时也仍然可以手写 `192.168.1.0/24 => 10.200.7.0/24` 强制指定。
 
+### 🧦 本地代理：`sr socks`（免 root，不动系统路由）
+
+```sh
+sr socks -c client.srkey -l 127.0.0.1:1080                     # SOCKS5 + HTTP CONNECT
+sr socks -c client.srkey -l 127.0.0.1:1080 -dns 192.168.2.1    # 域名解析也走隧道
+```
+
+- 不建虚拟网卡、不改路由表、**不需要管理员权限**：TCP 在进程内用用户态网络栈终结
+  （复用 wireguard-go 自带的 netstack），IP 包直接进隧道 —— 只有显式走这个代理的程序受影响
+- 覆盖所有支持 SOCKS5/HTTP 代理的程序：curl、git、ssh（`ProxyCommand`）、浏览器、Docker
+- 目标仍受服务端 ACL 约束；`-dns` 指向站点内 DNS 时，域名解析也不会出隧道
+- 实测：站点内 HTTP 8ms、吞吐 6.8 MB/s、与直连下载 md5 完全一致
+- 限制：只支持 TCP（UDP/ICMP/游戏请用整段路由模式 `sr client`）
+- 代价：`sr` 二进制约 6MB → 15MB
+
+### 🔒 安全加固（全链路重新评估）
+
+按攻击面逐环节过了一遍，结论与残余风险见 [`docs/SECURITY.md`](SECURITY.md)。本轮修复：
+
+- **抢注管理员**：初次部署生成**部署令牌**（`data/bootstrap-token`），注册管理员必须提供；
+  没有令牌文件时只允许本机/内网来源注册
+- **登录/注册按来源限速**（每 IP 30 次/15 分钟），叠加原有的按账号限速
+- **跨站守卫**：所有 POST 校验 Origin/Referer 同源（挡登录 CSRF）；脚本/curl 调用不受影响
+- **UDP 握手限速**：按来源 IP 令牌桶，防未认证握手洪水打满 CPU（超限静默丢弃 + 限频告警）
+- 注册表文件（含客户端动态码密钥）权限收紧为 **0600**；`/settings/password` 要求完整 MFA
+- 管控 API 默认只监听 **127.0.0.1**；站点页安装命令校验 Host 头；nginx 补安全响应头
+- 新增**修改密码**（改完吊销其它会话）；`COOKIE_SECURE=1` 供 HTTPS 部署启用
+- 部署提醒：首次注册需要数据目录里的部署令牌；控制面仍是明文 HTTP，公网暴露请先上 TLS
+
 ### 🔧 其它
 
 - `sr agent enroll --server <url> --code <码> -o <config>`：装机脚本背后的接入命令，可单独使用
