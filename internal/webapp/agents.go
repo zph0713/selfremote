@@ -294,13 +294,40 @@ func (s *Server) installerReady() bool {
 }
 
 // installCommand renders the one-liner an operator pastes on the target machine.
+// The control-plane address comes from the request's Host header, which the
+// client can set — so it is validated first (it ends up on the site page and in
+// the operator's clipboard; a spoofed Host must not be able to inject commands).
 func installCommand(r *http.Request, a *Agent) string {
-	base := "http://" + r.Host
+	base := webBase(r)
+	if base == "" {
+		return "" // caller hides the block; SERVER_ADDR is shown instead
+	}
+	return installCommandFor(base, a)
+}
+
+func installCommandFor(base string, a *Agent) string {
 	cmd := fmt.Sprintf("curl -fsSL %s/install.sh | sudo bash -s -- --code %s", base, a.EnrollCode)
 	if len(a.Routes) == 0 {
 		cmd += " --routes 192.168.1.0/24"
 	}
 	return cmd
+}
+
+// webBase returns "http://<host>" only for a plausible host header.
+func webBase(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if host == "" || len(host) > 253 {
+		return ""
+	}
+	for _, c := range host {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == ':' || c == '[' || c == ']':
+		default:
+			return ""
+		}
+	}
+	return "http://" + host
 }
 
 func installCommandDocker(r *http.Request, a *Agent) string {

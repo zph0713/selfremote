@@ -20,8 +20,9 @@
   {{end}}
   <p class="muted small">
     在<b>要接入的机器上</b>（root）执行下面这一行即可：下载 agent、用安装码换注册（现场生成密钥）、装成开机自启的服务。
-    安装码是一次性的，有效期 <b>{{.Data.CodeTTL}}</b>{{if not .Data.CodeValid}}（已过期，点下面的「生成新安装码」{{end}}{{if not .Data.CodeValid}}）{{end}}。
+    安装码是一次性的，有效期 <b>{{.Data.CodeTTL}}</b>{{if not .Data.CodeValid}}（已过期，点下面的「生成新安装码」）{{end}}。
   </p>
+  {{if .Data.InstallCmd}}
   <label>安装命令（Linux 直接跑 / macOS 同样可用）
     <input class="mono" type="text" readonly value="{{.Data.InstallCmd}}" onclick="this.select()">
   </label>
@@ -29,6 +30,10 @@
     <summary class="muted small">容器方式（目标机器上只有 docker）</summary>
     <input class="mono" type="text" readonly value="{{.Data.DockerCmd}}" onclick="this.select()">
   </details>
+  {{else}}
+  <div class="flash err">当前请求的 Host 头不是合法主机名/IP，无法生成安装命令 ——
+    请用 IP 或域名访问控制面（服务端地址：<code>{{.Data.Server}}</code>）。</div>
+  {{end}}
   <p style="margin-top:14px">
     <form method="post" action="/agents/{{.Data.Agent.AgentID}}/code" class="inline"
           onsubmit="return confirm('生成新的安装码？已接入的机器会立即失效，需要在目标机器上重新执行安装命令。')">

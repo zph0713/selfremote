@@ -31,19 +31,25 @@ type Config struct {
 	LANCIDRs   []string // legacy: home LAN subnets used when no site is selected
 	TunnelPort int      // hub UDP port (default 28333)
 
-	// v0.3: the hub's control API (status, kick, refresh).
+	// ServerAPI and ServerToken talk to the hub's control API.
 	ServerAPI    string // e.g. "http://server:8770"; empty = feature off
 	ServerToken  string // bearer token shared with the hub
 	AgentDistDir string // where agent binaries for deployment packages live
+
+	// CookieSecure marks session cookies Secure (turn on when the console is
+	// served over HTTPS; browsers will then refuse to send them over plain HTTP).
+	CookieSecure bool
 }
 
 // Server is the web control plane.
 type Server struct {
-	cfg           Config
-	db            *sql.DB
-	pages         map[string]*template.Template
-	limit         *loginLimiter
-	enrollLimiter *enrollLimiter
+	cfg            Config
+	db             *sql.DB
+	pages          map[string]*template.Template
+	limit          *loginLimiter
+	enrollLimiter  *enrollLimiter
+	ipLimiter      *ipLimiter // 按来源 IP 的登录/注册限速
+	bootstrapToken string     // 非空时，第一个管理员的注册必须带它
 }
 
 // New opens the database, applies the schema and prepares templates.
@@ -67,7 +73,20 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	if err := migrate(ctx, db); err != nil {
 		return nil, fmt.Errorf("database: %w", err)
 	}
-	s := &Server{cfg: cfg, db: db, limit: newLoginLimiter(), enrollLimiter: newEnrollLimiter()}
+	s := &Server{
+		cfg:            cfg,
+		db:             db,
+		limit:          newLoginLimiter(),
+		enrollLimiter:  newEnrollLimiter(),
+		ipLimiter:      newIPLimiter(30, 15*time.Minute),
+		bootstrapToken: "",
+	}
+	s.bootstrapToken = s.loadBootstrapToken()
+	if s.bootstrapToken != "" {
+		log.Printf("安全：已启用部署令牌（第一个管理员注册需要它）")
+	} else {
+		log.Printf("安全提示：没有 %s，第一个管理员只允许从内网/本机注册", s.bootstrapTokenPath())
+	}
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
 	}
@@ -122,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /{$}", s.auth(s.handleDashboard))
 	mux.HandleFunc("GET /settings", s.auth(s.handleSettings))
+	mux.HandleFunc("POST /settings/password", s.authMFA(s.handlePasswordChange))
 	mux.HandleFunc("POST /settings/mfa/begin", s.auth(s.handleMFABegin))
 	mux.HandleFunc("GET /settings/mfa/qr", s.auth(s.handleMFAQR))
 	mux.HandleFunc("POST /settings/mfa/confirm", s.auth(s.handleMFAConfirm))
@@ -148,7 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /users", s.authAdmin(s.handleUsers))
 	mux.HandleFunc("POST /users/new", s.authAdmin(s.handleUserCreate))
 
-	return logRequests(mux)
+	return logRequests(s.sameOriginGuard(mux))
 }
 
 func logRequests(next http.Handler) http.Handler {
@@ -391,11 +411,17 @@ func (s *Server) syncAgents(ctx context.Context) error {
 }
 
 // writeDataFile writes one of the shared registries atomically.
+//
+// 0600 on purpose: clients.json carries each device's TOTP secret (the hub needs
+// it to verify codes), so these files must not be world-readable on a shared host.
 func (s *Server) writeDataFile(name string, raw []byte) error {
 	tmp := filepath.Join(s.cfg.DataDir, name+".tmp")
 	final := filepath.Join(s.cfg.DataDir, name)
-	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return err
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		log.Printf("chmod %s: %v", tmp, err)
 	}
 	return os.Rename(tmp, final)
 }

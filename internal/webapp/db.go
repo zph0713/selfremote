@@ -253,6 +253,18 @@ func (s *Server) setTOTPSecret(ctx context.Context, userID int64, secret string)
 	return err
 }
 
+func (s *Server) updateUserPassword(ctx context.Context, userID int64, hash string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ?`, hash, userID)
+	return err
+}
+
+// deleteOtherSessions invalidates every session of a user except keep (used
+// after a password change: other devices must log in again).
+func (s *Server) deleteOtherSessions(ctx context.Context, userID int64, keep string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND id <> ?`, userID, keep)
+	return err
+}
+
 func (s *Server) enableTOTP(ctx context.Context, userID int64) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET totp_enabled = 1 WHERE id = ?`, userID)
 	return err

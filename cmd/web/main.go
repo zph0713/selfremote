@@ -29,6 +29,7 @@ func main() {
 	srvAPI := flag.String("server-api", envOr("SRV_API_URL", ""), "hub control API base URL, e.g. http://server:8770")
 	srvToken := flag.String("server-token", envOr("SRV_API_TOKEN", ""), "bearer token for the hub control API (or point SRV_API_TOKEN_FILE at the shared token file)")
 	agentDist := flag.String("agent-dist", envOr("AGENT_DIST_DIR", "/agent-dist"), "directory with agent binaries for deployment packages")
+	cookieSecure := flag.Bool("cookie-secure", envOr("COOKIE_SECURE", "") == "1", "mark session cookies Secure (enable when serving the console over HTTPS)")
 	flag.Parse()
 
 	if *dsn == "" {
@@ -67,6 +68,7 @@ func main() {
 		ServerAPI:    *srvAPI,
 		ServerToken:  token,
 		AgentDistDir: *agentDist,
+		CookieSecure: *cookieSecure,
 	})
 	if err != nil {
 		log.Fatalf("init: %v", err)

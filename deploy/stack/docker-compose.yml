@@ -36,6 +36,8 @@ services:
   web:
     image: ${SR_WEB_IMAGE:-ghcr.io/zph0713/selfremote-web:latest}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       DB_DSN: "sr:${DB_PASSWORD}@tcp(db:3306)/selfremote?parseTime=true&charset=utf8mb4"
       DATA_DIR: /data
@@ -46,6 +48,8 @@ services:
       SRV_API_URL: ${SRV_API_URL:-http://server:8770}
       SRV_API_TOKEN_FILE: /data/api-token
       AGENT_DIST_DIR: /agent-dist
+      # 控制面走 HTTPS 时设为 1：会话 Cookie 会带上 Secure（浏览器不再明文发送）
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
     volumes:
       - ${SR_CONFIG_DIR:-./data}:/data
     extra_hosts:
@@ -74,6 +78,8 @@ services:
     image: ${SR_IMAGE:-ghcr.io/zph0713/selfremote:latest}
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ${SR_CONFIG_DIR:-./data}:/etc/selfremote
     command: ["server", "-c", "/etc/selfremote/server.json"]

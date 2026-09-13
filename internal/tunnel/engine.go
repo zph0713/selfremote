@@ -165,12 +165,16 @@ type Engine struct {
 	relay       relayCounters
 
 	// Agent mode: address translation, forwarding gate and announce timer.
-	translator    *Translator
-	forwarding    atomic.Bool
-	announceAt    time.Time
-	agentStarted  time.Time
-	agentDrops    atomic.Uint64
-	agentDropLog  time.Time
+	translator   *Translator
+	forwarding   atomic.Bool
+	announceAt   time.Time
+	agentStarted time.Time
+	agentDrops   atomic.Uint64
+	agentDropLog time.Time
+
+	// Responder side: per-IP handshake rate limiting.
+	hsLimiter     *hsLimiter
+	hsLogAt       time.Time  // last handshake-flood warning (rate-limited)
 	lastAgentInfo *AgentInfo // our own last announce (for status)
 
 	// Client: ready callback fired once per run.
@@ -194,6 +198,7 @@ func New(opts Options) (*Engine, error) {
 		logf:      opts.Logf,
 		peers:     make(map[string]*peerState),
 		addr2peer: make(map[string]*peerState),
+		hsLimiter: newHSLimiter(),
 	}
 	if e.logf == nil {
 		e.logf = log.Printf
@@ -646,6 +651,11 @@ func (e *Engine) handlePacket(addr *net.UDPAddr, frame []byte) {
 	switch typ {
 	case frameHandshakeInit:
 		if e.opts.Mode.responder() {
+			// 未认证的握手要花一次 X25519：按来源限速，避免被握手洪水拖垮
+			if ip := addr.IP.String(); !e.hsLimiter.allow(ip) {
+				e.noteHSDrop(ip)
+				return
+			}
 			e.handleHandshakeInit(addr, payload)
 		}
 	case frameHandshakeResp:

@@ -103,18 +103,18 @@ func (l *loginLimiter) reset(key string) {
 	delete(l.m, key)
 }
 
-func setSessionCookie(w http.ResponseWriter, sid string, expires time.Time) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, sid string, expires time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: sid, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cfg.CookieSecure,
 		Expires: expires, MaxAge: int(time.Until(expires).Seconds()),
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func (s *Server) clearSessionCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: "", Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.cfg.CookieSecure, MaxAge: -1,
 	})
 }
 
@@ -189,7 +189,13 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	fail := func(msg string) {
 		s.render(w, r, "login.html", pageData{Title: "登录", Error: msg, Data: map[string]any{}})
 	}
+	ipKey := "login:" + clientIP(r)
+	if !s.ipLimiter.allow(ipKey) {
+		fail("尝试次数过多，请稍后再试")
+		return
+	}
 	if !s.limit.allowed(username) {
+		s.ipLimiter.record(ipKey)
 		fail("尝试次数过多，请 5 分钟后再试")
 		return
 	}
@@ -201,6 +207,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if u == nil || !verifyPassword(u.PasswordHash, password) {
 		s.limit.record(username)
+		s.ipLimiter.record(ipKey)
 		fail("用户名或密码错误")
 		return
 	}
@@ -211,6 +218,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		}
 		if !verifyTOTP(u.TOTPSecret, code) && !s.tryRecovery(ctx, u, code) {
 			s.limit.record(username)
+			s.ipLimiter.record(ipKey)
 			fail("动态验证码错误")
 			return
 		}
@@ -224,7 +232,7 @@ func (s *Server) handleLoginPost(w http.ResponseWriter, r *http.Request) {
 		fail("内部错误")
 		return
 	}
-	setSessionCookie(w, sid, expires)
+	s.setSessionCookie(w, sid, expires)
 	log.Printf("user %s logged in", u.Username)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -233,8 +241,57 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request, u *User) {
 	if sess := sessFrom(r); sess != nil {
 		_ = s.deleteSession(r.Context(), sess.ID)
 	}
-	clearSessionCookie(w)
+	s.clearSessionCookie(w)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// handlePasswordChange rotates the signed-in user's own password. Requires a
+// full (MFA-verified) session, the current password, and invalidates the
+// user's other sessions afterwards.
+func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request, u *User) {
+	ctx := r.Context()
+	if !checkCSRF(r, sessFrom(r)) {
+		redirectMsg(w, r, "/settings", "", "表单校验失败，请重试")
+		return
+	}
+	current := r.FormValue("current")
+	next := r.FormValue("password")
+	confirm := r.FormValue("confirm")
+
+	if !verifyPassword(u.PasswordHash, current) {
+		s.ipLimiter.record("pwchange:" + clientIP(r))
+		redirectMsg(w, r, "/settings", "", "当前密码不正确")
+		return
+	}
+	if err := validPassword(next); err != nil {
+		redirectMsg(w, r, "/settings", "", err.Error())
+		return
+	}
+	if next != confirm {
+		redirectMsg(w, r, "/settings", "", "两次输入的新密码不一致")
+		return
+	}
+	if verifyPassword(u.PasswordHash, next) {
+		redirectMsg(w, r, "/settings", "", "新密码不能和当前密码相同")
+		return
+	}
+	hash, err := hashPassword(next)
+	if err != nil {
+		redirectMsg(w, r, "/settings", "", "内部错误")
+		return
+	}
+	if err := s.updateUserPassword(ctx, u.ID, hash); err != nil {
+		log.Printf("update password: %v", err)
+		redirectMsg(w, r, "/settings", "", "保存失败")
+		return
+	}
+	if sess := sessFrom(r); sess != nil {
+		if err := s.deleteOtherSessions(ctx, u.ID, sess.ID); err != nil {
+			log.Printf("deleteOtherSessions: %v", err)
+		}
+	}
+	log.Printf("user %s changed their password（其它会话已失效）", u.Username)
+	redirectMsg(w, r, "/settings", "密码已更新；其它设备上的登录已全部失效", "")
 }
 
 func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +304,9 @@ func (s *Server) handleRegisterPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
-	s.render(w, r, "register.html", pageData{Title: "创建管理员账号", Data: map[string]any{}})
+	s.render(w, r, "register.html", pageData{Title: "创建管理员账号", Data: map[string]any{
+		"NeedsToken": s.bootstrapToken != "",
+	}})
 }
 
 func (s *Server) handleRegisterPost(w http.ResponseWriter, r *http.Request) {
@@ -266,8 +325,22 @@ func (s *Server) handleRegisterPost(w http.ResponseWriter, r *http.Request) {
 	confirm := r.FormValue("confirm")
 
 	fail := func(msg string) {
-		s.render(w, r, "register.html", pageData{Title: "创建管理员账号", Error: msg, Data: map[string]any{}})
+		s.render(w, r, "register.html", pageData{Title: "创建管理员账号", Error: msg, Data: map[string]any{
+			"NeedsToken": s.bootstrapToken != "",
+		}})
 	}
+	// 第一个管理员是整套系统的根：要么带部署令牌，要么只能从内网/本机注册
+	if err := s.registrationAllowed(r, r.FormValue("bootstrap")); err != nil {
+		log.Printf("register: 拒绝（%s）：%v", clientIP(r), err)
+		fail(err.Error())
+		return
+	}
+	ipKey := "register:" + clientIP(r)
+	if !s.ipLimiter.allow(ipKey) {
+		fail("尝试次数过多，请稍后再试")
+		return
+	}
+	s.ipLimiter.record(ipKey)
 	if err := validUsername(username); err != nil {
 		fail(err.Error())
 		return
@@ -298,7 +371,7 @@ func (s *Server) handleRegisterPost(w http.ResponseWriter, r *http.Request) {
 		fail("内部错误")
 		return
 	}
-	setSessionCookie(w, sid, expires)
+	s.setSessionCookie(w, sid, expires)
 	log.Printf("admin user %s created", username)
 	// 首次部署：init.sh 预置的「本机站点」需要有个属主，管理员一出现就导入。
 	if err := s.ImportPreprovision(ctx); err != nil {

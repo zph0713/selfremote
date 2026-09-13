@@ -44,7 +44,7 @@ else
   "tunnel_cidr": "10.77.0.1/24",
   "clients_file": "/etc/selfremote/clients.json",
   "agents_file": "/etc/selfremote/agents.json",
-  "api_listen": "0.0.0.0:$APIPORT",
+  "api_listen": "127.0.0.1:$APIPORT",
   "api_token": "$TOKEN",
   "status_file": "/etc/selfremote/server-status.json",
   "netinfo_file": "/etc/selfremote/netinfo.json"
@@ -54,6 +54,13 @@ EOF
   printf '%s' "$TOKEN" > "$DIR/api-token"
   chmod 600 "$DIR/api-token"
   echo "已生成 $DIR/server.json 与 $DIR/api-token"
+fi
+
+# ---- 初次部署令牌：防止别人抢先注册管理员 --------------------------------
+if [ ! -f "$DIR/bootstrap-token" ]; then
+  head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$DIR/bootstrap-token"
+  chmod 600 "$DIR/bootstrap-token"
+  echo "已生成 $DIR/bootstrap-token（注册第一个管理员时要用）"
 fi
 
 # ---- 本机站点（agent-home）：初次部署就和 server/web 一起装好 -----------------
@@ -101,7 +108,8 @@ fi
 echo
 echo "== 下一步"
 echo "  1) docker compose up -d          # 起 db / web / nginx / server / agent-home"
-echo "  2) 打开 http://<主机>:8080 注册管理员并绑定 Google Authenticator"
+echo "  2) 打开 http://<主机>:8080 注册管理员（需要部署令牌）："
+echo "       $(cat "$DIR/bootstrap-token" 2>/dev/null || echo '（见数据目录 bootstrap-token）')"
 echo "     （注册完成的一刻，本机站点会自动挂到你名下并显示「在线」）"
 echo "  3) 「客户端密钥」→ 生成密钥（勾选站点）→ 在客户端机器上运行"
 echo

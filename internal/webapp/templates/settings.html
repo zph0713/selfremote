@@ -45,4 +45,22 @@
   <button type="submit">开始绑定 Google Authenticator</button>
 </form>
 {{end}}
+
+<div class="card">
+  <h2>修改密码</h2>
+  <p class="muted small">修改后，其它设备上的登录会立即失效（当前这个会话保留）。</p>
+  <form method="post" action="/settings/password">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>当前密码
+      <input type="password" name="current" autocomplete="current-password" required>
+    </label>
+    <label>新密码（至少 8 位，建议更长）
+      <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <label>确认新密码
+      <input type="password" name="confirm" autocomplete="new-password" minlength="8" required>
+    </label>
+    <button type="submit">更新密码</button>
+  </form>
+</div>
 {{end}}
