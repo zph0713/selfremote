@@ -1,0 +1,11 @@
+{
+  "listen": "[::]:28333",
+  "private_key": "（sr genkey 输出的 private_key）",
+  "tunnel_cidr": "10.77.0.1/24",
+  "clients_file": "/etc/selfremote/clients.json",
+  "agents_file": "/etc/selfremote/agents.json",
+  "api_listen": "0.0.0.0:8770",
+  "api_token": "（随机令牌；控制面用它调用管控 API，默认只在内网暴露）",
+  "status_file": "/etc/selfremote/server-status.json",
+  "netinfo_file": "/etc/selfremote/netinfo.json"
+}

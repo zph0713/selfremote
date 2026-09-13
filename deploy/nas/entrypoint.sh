@@ -55,6 +55,22 @@ case "${1:-}" in
   gateway|agent)
     # Both roles own the site's local network path: the agent needs exactly
     # the same forwarding + SNAT setup as the standalone gateway.
+    #
+    # First deployment of a site: the config file arrives later (created in
+    # the web UI), so wait for it instead of crash-looping.
+    CFG=""
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-c" ]; then CFG="$a"; break; fi
+      prev="$a"
+    done
+    if [ -n "$CFG" ] && [ ! -f "$CFG" ]; then
+      echo "WARN: 找不到配置文件 $CFG"
+      echo "      首次部署：在网页「站点 Agent」里创建站点并下载部署包，"
+      echo "      把包里的 <站点id>.srkey 放进本容器的数据目录后会自动继续（每 5 秒检查一次）。"
+      while [ ! -f "$CFG" ]; do sleep 5; done
+      echo "== 检测到配置文件，继续启动"
+    fi
     setup_network
     ;;
 esac

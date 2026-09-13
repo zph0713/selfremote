@@ -59,6 +59,17 @@ func cmdAgent(args []string) error {
 		secret = cfg.MFASecret
 	}
 
+	// Containerised deployments often need a different hub address than the
+	// one baked into the (encrypted) configuration — e.g. a compose service
+	// name instead of 127.0.0.1. SR_AGENT_SERVER wins, then the desktop
+	// override used by docker-compose.desktop.yml.
+	serverAddr := cfg.Server
+	if v := os.Getenv("SR_AGENT_SERVER"); v != "" {
+		serverAddr = v
+	} else if v := os.Getenv("SR_AGENT_SERVER_OVERRIDE"); v != "" {
+		serverAddr = v
+	}
+
 	routes := make([]tunnel.RouteMap, 0, len(cfg.Routes))
 	for i, r := range cfg.Routes {
 		m, err := tunnel.ParseRouteMap(r.Real, r.Virtual)
@@ -71,7 +82,7 @@ func cmdAgent(args []string) error {
 	eng, err := tunnel.New(tunnel.Options{
 		Mode:         tunnel.ModeAgent,
 		PrivateKey:   cfg.Private[:],
-		Server:       cfg.Server,
+		Server:       serverAddr,
 		ServerPublic: cfg.ServerPublic[:],
 		TunnelCIDR:   cfg.TunnelCIDR,
 		AgentID:      cfg.ID,
@@ -92,13 +103,14 @@ func cmdAgent(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Bridge networks reach the hub by compose service name, not loopback.
 	name := cfg.Name
 	if name == "" {
 		name = cfg.ID
 	}
 	fmt.Printf("selfremote agent %s\n", version)
 	fmt.Printf("  节点:    %s (%s)\n", name, cfg.ID)
-	fmt.Printf("  服务端:  %s\n", cfg.Server)
+	fmt.Printf("  服务端:  %s\n", serverAddr)
 	fmt.Printf("  隧道:    %s\n", cfg.TunnelCIDR)
 	fmt.Printf("  网段:    %s\n", routeList(routes))
 	if secret != "" {

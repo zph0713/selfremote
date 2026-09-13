@@ -27,7 +27,7 @@ func main() {
 	tunnelPort := flag.Int("tunnel-port", envInt("TUNNEL_PORT", 28333), "hub UDP port")
 	dsn := flag.String("dsn", envOr("DB_DSN", ""), "MariaDB DSN, e.g. sr:pass@tcp(db:3306)/selfremote?parseTime=true&charset=utf8mb4")
 	srvAPI := flag.String("server-api", envOr("SRV_API_URL", ""), "hub control API base URL, e.g. http://server:8770")
-	srvToken := flag.String("server-token", envOr("SRV_API_TOKEN", ""), "bearer token for the hub control API")
+	srvToken := flag.String("server-token", envOr("SRV_API_TOKEN", ""), "bearer token for the hub control API (or point SRV_API_TOKEN_FILE at the shared token file)")
 	agentDist := flag.String("agent-dist", envOr("AGENT_DIST_DIR", "/agent-dist"), "directory with agent binaries for deployment packages")
 	flag.Parse()
 
@@ -38,6 +38,19 @@ func main() {
 	for _, c := range strings.Split(*lanCIDRs, ",") {
 		if c = strings.TrimSpace(c); c != "" {
 			cidrs = append(cidrs, c)
+		}
+	}
+
+	// The hub's control API token may come from a shared file instead of an
+	// environment variable (init.sh writes it next to the registries).
+	token := *srvToken
+	if token == "" {
+		if p := envOr("SRV_API_TOKEN_FILE", ""); p != "" {
+			if raw, err := os.ReadFile(p); err == nil {
+				token = strings.TrimSpace(string(raw))
+			} else {
+				log.Printf("SRV_API_TOKEN_FILE %s: %v", p, err)
+			}
 		}
 	}
 
@@ -52,7 +65,7 @@ func main() {
 		LANCIDRs:     cidrs,
 		TunnelPort:   *tunnelPort,
 		ServerAPI:    *srvAPI,
-		ServerToken:  *srvToken,
+		ServerToken:  token,
 		AgentDistDir: *agentDist,
 	})
 	if err != nil {

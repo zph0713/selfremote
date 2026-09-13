@@ -1,0 +1,12 @@
+{
+  "id": "home",
+  "name": "家里 NAS",
+  "server": "nas.example.com:28333",
+  "private_key": "（站点自己的 sr genkey private_key；通常由控制面生成并加密下发）",
+  "server_public_key": "（服务端 sr genkey 的 public_key）",
+  "tunnel_cidr": "10.77.0.100/24",
+  "mfa_secret": "（Base32 动态码密钥；必须与 agents.json 里该站点的 totp_secret 一致）",
+  "routes": [
+    { "real": "192.168.1.0/24", "virtual": "10.200.7.0/24" }
+  ]
+}

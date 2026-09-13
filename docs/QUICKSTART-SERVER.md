@@ -1,78 +1,142 @@
-# 服务端快速开始（Docker，任意主机）
+# 服务端 / 站点快速开始（命令行模式，无 Web 控制面）
 
-> 服务端 = 家里的「网关」：监听加密隧道（UDP），把隧道里的流量转发进内网（SNAT）。
-> 任何 Docker 主机都能跑：Linux 服务器、群晖 NAS、甚至临时借用的电脑。
+> v0.3 起服务端分成两个角色：
+> - **中转服务端 `sr server`**：监听一个 UDP 端口，把客户端与各站点汇总中转（用户态转发，
+>   不需要 TUN / NET_ADMIN / 内核转发）；可跑在任意 VPS、容器、甚至笔记本上
+> - **站点 Agent `sr agent`**：部署在能访问目标内网的机器上（NAS、服务器、软路由…），
+>   主动拨号服务端，负责 tun + 转发 + SNAT + 地址翻译
+>
+> 用 Web 控制面（推荐）时这两个角色由控制面生成配置与部署包，见
+> [QUICKSTART-WEB.md](QUICKSTART-WEB.md)；本页是手工/无控制面的用法。
+> v0.2 的直连模式（`sr gateway`，客户端直连网关）仍然可用，见文末。
 
 ## 0. 前置条件
 
-- 主机能运行 Docker；内核有 `/dev/net/tun`（普通 Linux / 群晖都有）
-- 客户端能连到它：公网 IPv6（推荐）或公网 IPv4
-- UDP 端口（默认 `28333`）在防火墙放行
+- 中转服务端：一个**公网可达**的 UDP 端口（IPv6 或 IPv4），不需要 TUN、不需要特权
+- 站点机器：Linux/macOS，能访问目标内网；容器方式需要 `/dev/net/tun` 与 NET_ADMIN
+- 客户端能连到服务端（域名或 IP）
 
-## 1. 获取镜像（三选一）
+## 1. 获取镜像 / 二进制
 
 ```sh
-# A. 在线拉取（GitHub 容器仓库）
+# 在线拉取（中转服务端与站点共用同一个镜像）
 docker pull ghcr.io/zph0713/selfremote:latest
 
-# B. 离线导入（Release 里下载 selfremote-image-linux-amd64.tar.gz）
+# 离线导入（Release 里的 selfremote-image-linux-amd64.tar.gz）
 docker load -i selfremote-image-linux-amd64.tar.gz
 
-# C. 源码本地构建（仓库根目录）
+# 或源码构建
 docker build -f deploy/nas/Dockerfile -t selfremote:latest .
 ```
 
-## 2. 生成服务端密钥
+## 2. 生成密钥
 
 ```sh
 docker run --rm ghcr.io/zph0713/selfremote:latest genkey
-# private_key = ...   ← 填进 gateway.json
-# public_key  = ...   ← 提供给客户端
+# private_key = ...   ← 填进 server.json
+# public_key  = ...   ← 客户端/站点配置里的 server_public_key
 ```
 
-## 3. 写配置 gateway.json
+## 3. 写配置 server.json 并启动
 
-（模板见 `deploy/examples/gateway.json.example`）
+（模板见 `deploy/examples/server.json.example`）
 
 ```json
 {
   "listen": "[::]:28333",
   "private_key": "（第 2 步的 private_key）",
   "tunnel_cidr": "10.77.0.1/24",
-  "peers": [
-    { "name": "my-mac", "public_key": "（客户端 genkey 的 public_key）" }
+  "clients_file": "/etc/selfremote/clients.json",
+  "agents_file": "/etc/selfremote/agents.json",
+  "api_listen": "0.0.0.0:8770",
+  "api_token": "（随机串；只给控制面用，不要暴露公网）",
+  "status_file": "/etc/selfremote/server-status.json",
+  "netinfo_file": "/etc/selfremote/netinfo.json"
+}
+```
+
+```sh
+docker run -d --name selfremote-server --restart unless-stopped \
+  --network host \
+  -v /etc/selfremote:/etc/selfremote \
+  ghcr.io/zph0713/selfremote:latest server -c /etc/selfremote/server.json
+```
+
+> 服务端不用 `--cap-add`、不用 `/dev/net/tun`；`--network host` 只是为了拿到宿主 UDP 端口，
+> 也可以改成 `-p 28333:28333/udp -p 127.0.0.1:8770:8770`。
+
+## 4. 注册客户端与站点（手工写注册表）
+
+`clients.json`（客户端设备：公钥 + 隧道地址 + 允许访问的站点 id）：
+
+```json
+{
+  "clients": [
+    { "name": "my-mac", "user": "me", "public_key": "（客户端 genkey 的 public_key）",
+      "totp_secret": "（Base32 动态码密钥，留空则不要求 MFA）",
+      "tunnel_ip": "10.77.0.2",
+      "agents": ["home"] }
   ]
 }
 ```
 
-## 4. 运行
+`agents.json`（站点：公钥 + 隧道地址 + 网段映射）：
 
-**Linux / 群晖（推荐 host 网络）：**
-
-```sh
-docker run -d --name selfremote-gw --restart unless-stopped \
-  --network host \
-  --cap-add NET_ADMIN --cap-add NET_RAW \
-  --device /dev/net/tun:/dev/net/tun \
-  -v /etc/selfremote:/etc/selfremote \
-  ghcr.io/zph0713/selfremote:latest gateway -c /etc/selfremote/gateway.json
+```json
+{
+  "agents": [
+    { "id": "home", "name": "家里 NAS", "public_key": "（站点 genkey 的 public_key）",
+      "tunnel_ip": "10.77.0.100", "totp_secret": "（站点自动应答用的 Base32 密钥）",
+      "enabled": true,
+      "routes": [ { "real": "192.168.1.0/24", "virtual": "10.200.7.0/24" } ] }
+  ]
+}
 ```
 
-**Docker Desktop（Windows / macOS 本机试验）**：把 `--network host` 换成 `-p 28333:28333/udp`。
+- `virtual` 省略 = 原样呈现；两个站点真实网段相同时，给其中一个填虚拟网段即可共存
+- 服务端每 250ms 检查文件变化，**无需重启**：新增/删除/停用立即生效
 
-## 5. 宿主上必须做的两件事
+## 5. 站点端配置与启动
 
-1. **开启 IPv4 转发**：`sysctl -w net.ipv4.ip_forward=1`
-   （群晖：控制面板 → 任务计划 → 开机执行；容器启动时会尽力设置，但不保证）
-2. **防火墙放行 UDP 28333**
+（模板见 `deploy/examples/agent.json.example`；用 Web 控制面时会下发加密的 `.srkey`）
 
-转发 / NAT 规则由容器 entrypoint 自动配置（幂等），无需手动写 iptables。
+```json
+{
+  "id": "home",
+  "name": "家里 NAS",
+  "server": "nas.example.com:28333",
+  "private_key": "（站点自己的 genkey private_key）",
+  "server_public_key": "（第 2 步的服务端 public_key）",
+  "tunnel_cidr": "10.77.0.100/24",
+  "mfa_secret": "（与服务端 agents.json 里一致的 Base32 密钥）",
+  "routes": [ { "real": "192.168.1.0/24", "virtual": "10.200.7.0/24" } ]
+}
+```
+
+```sh
+docker run -d --name selfremote-agent --restart unless-stopped \
+  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
+  --device /dev/net/tun --sysctl net.ipv4.ip_forward=1 \
+  -v /etc/selfremote:/etc/selfremote \
+  ghcr.io/zph0713/selfremote:latest agent -c /etc/selfremote/agent.json
+```
+
+站点宿主上必须开启 IPv4 转发（`sysctl -w net.ipv4.ip_forward=1`，群晖用「任务计划 → 开机」）；
+转发与 SNAT 规则由容器 entrypoint 幂等配置。裸机运行二进制时自行配置：
+`iptables -t nat -A POSTROUTING -s 10.77.0.0/24 ! -o sr0 -j MASQUERADE`。
 
 ## 6. 验证
 
 ```sh
-docker logs selfremote-gw
-# 客户端连上后应出现：gateway: session established with ...
+docker logs selfremote-server   # 站点连上：session established with ... [agent]
+docker logs selfremote-agent    # 出现 banner：═══ selfremote agent 已上线 ═══
 ```
 
-客户端侧 `ping 内网IP` 应通。更多排错见 [DEPLOY-NAS.md](DEPLOY-NAS.md) 第 6 节。
+客户端 `ping 10.200.7.50`（虚拟网段 + 主机号）应通；`ping 10.77.0.1` 能验证"服务端可达"。
+
+## 附：v0.2 直连模式（`sr gateway`）
+
+不想要中转、客户端能直连站点公网地址时，可用老模式：站点跑
+`sr gateway -c gateway.json`（见 `deploy/examples/gateway.json.example`），
+客户端配置的 `server` 直接填它、`server_public_key` 填网关公钥。功能等同 v0.2：
+单站点、客户端直连、隧道内 MFA。**注意**：直连模式下没有多站点汇总与 ACL。

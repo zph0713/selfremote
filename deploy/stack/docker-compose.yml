@@ -1,10 +1,16 @@
-# selfremote 全家桶：nginx（反代）+ web（控制面）+ mariadb + gateway（隧道网关）
+# selfremote 全家桶 v0.3：nginx（反代）+ web（控制面）+ mariadb + server（中转）+ agent-home（本机站点）
+#
+# 拓扑：
+#   客户端 ──▶ server（中转，用户态，无特权）──▶ agent-*（各站点，tun + SNAT）──▶ 站点内网
+#                    ▲
+#              web 控制面（站点管理 / 客户端密钥 / 启停踢线）
 #
 # 用法（Linux NAS / 任意 Docker 主机）：
-#   1. cp .env.example .env && vi .env        # 改数据库密码、数据目录等
-#   2. bash init.sh                           # 生成网关密钥与 gateway.json（幂等，只需一次）
+#   1. cp .env.example .env && vi .env        # 数据库密码、端口等
+#   2. bash init.sh                           # 生成 server.json / 令牌 / 本机站点 agent 配置（幂等）
 #   3. docker compose up -d
 #   4. 浏览器打开 http://<主机>:8080 → 注册管理员 → 绑定 Google Authenticator
+#   5. 在「站点 Agent」页确认本机站点（home）在线；其他站点在那台机器上按部署包接入
 #
 # Docker Desktop（Windows/macOS 本机试验）：加 -f docker-compose.desktop.yml
 #   （桌面版的 host 网络是虚拟机 netns，必须换成桥接 + 发布端口）
@@ -37,8 +43,13 @@ services:
       SERVER_ADDR: ${SERVER_ADDR:-}
       LAN_CIDRS: ${LAN_CIDRS:-192.168.1.0/24}
       TUNNEL_PORT: ${TUNNEL_PORT:-28333}
+      SRV_API_URL: ${SRV_API_URL:-http://server:8770}
+      SRV_API_TOKEN_FILE: /data/api-token
+      AGENT_DIST_DIR: /agent-dist
     volumes:
       - ${SR_CONFIG_DIR:-./data}:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -53,7 +64,19 @@ services:
     depends_on:
       - web
 
-  gateway:
+  # 中转服务端：一个 UDP 端口同时接受客户端与站点 agent，用户态转发。
+  # 不需要 TUN / NET_ADMIN / ip_forward —— 只有 host 网络为了拿到宿主的 UDP 端口。
+  server:
+    image: ${SR_IMAGE:-ghcr.io/zph0713/selfremote:latest}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ${SR_CONFIG_DIR:-./data}:/etc/selfremote
+    command: ["server", "-c", "/etc/selfremote/server.json"]
+
+  # 本机站点（NAS 自己所在的内网）：agent 形态与远程站点完全一致，
+  # 只是配置指向 127.0.0.1。不需要这个内网时可删掉本服务。
+  agent-home:
     image: ${SR_IMAGE:-ghcr.io/zph0713/selfremote:latest}
     restart: unless-stopped
     network_mode: host
@@ -61,11 +84,13 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      SR_LAN_IF: ${SR_LAN_IF:-eth0}
+      SR_KEYPASS: ${SR_AGENT_KEYPASS:?请在 .env 设置 SR_AGENT_KEYPASS（本机站点配置文件密码）}
       SR_TUNNEL_CIDR: ${SR_TUNNEL_CIDR:-10.77.0.0/24}
     volumes:
       - ${SR_CONFIG_DIR:-./data}:/etc/selfremote
-    command: ["gateway", "-c", "/etc/selfremote/gateway.json"]
+    command: ["agent", "-c", "/etc/selfremote/agent-home.srkey"]
+    depends_on:
+      - server
 
 volumes:
   db-data:

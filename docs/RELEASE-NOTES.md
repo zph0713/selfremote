@@ -1,75 +1,67 @@
-# selfremote 发布说明
+# v0.3.0 — 服务端 / 站点（Agent）/ 客户端 / 控制面 四角色拆离
 
-自研远程接入隧道：让在外网的设备（Mac / 笔记本）直连**家庭内网的内网 IP** —— NAS、路由器、任意设备、任意端口。
+这一版把原来的「网关」一分为二：**中转服务端**只做汇总与转发，**站点 Agent** 负责某个内网的
+接入；客户端与 Web 控制面延续 v0.2 的能力，并新增站点管理与部署分发。
 
-## v0.2.2 修复
+## 新增
 
-- **macOS 客户端崩溃修复**：utun 读取偏移错误，连接时会 `panic: slice bounds out of range [-4:]`
-  （wireguard-go 的 darwin 契约要求读取偏移 ≥ 4 字节 utun 头；已加模拟测试锁死）
+### 🛰 中转服务端（`sr server`）
 
-## v0.2.1 修复
+- 一个 UDP 端口同时接受**客户端**与**站点 Agent**，在用户态完成中转：
+  **不需要 TUN、NET_ADMIN、ip_forward** —— 任意 VPS / 容器 / 笔记本都能跑
+- 按站点申报的网段选路；逐包校验源地址（防伪造）、目标站点、在线状态与
+  **客户端→站点 ACL**；站点之间、客户端之间默认不可互访
+- 自答 `10.77.0.1` 的 ICMP echo（"服务端可达"诊断）
+- 热加载 `clients.json` + `agents.json`（控制面写入，删除条目 = 立即吊销）
+- 管控 API：`GET /api/v1/status|agents`、`POST /api/v1/agents/{id}/kick|refresh`（Bearer 令牌）
 
-- **macOS 客户端连接修复**：配置虚拟网卡的子网掩码格式错误（hex → 点分十进制），
-  此前在 Mac 上会报 `ifconfig: ffffff00: bad value` 而无法建立连接
-- macOS 路由注入改用全版本兼容的 `-net/-netmask` 语法
-- 「双击启动.command」与文档明确区分连接时的三个提示（sudo 登录密码 / 文件密码 / 动态码）
+### 🌐 站点 Agent（`sr agent`）
 
-## v0.2.0 亮点
+- **主动拨号**服务端：可部署在 NAT/防火墙之后，不需要任何入站端口
+- 本地网络承接：tun + `ip_forward` + 源地址改写（多网卡无需指定接口名）
+- **每站点虚拟网段 + 无状态地址翻译**：两个站点都跑 `192.168.1.0/24` 也能同时接入
+  （站点侧改写 real ↔ virtual，校验和/分片/IPv6 全覆盖）
+- **无人值守 MFA**：配置文件携带独立动态码密钥，自动应答服务端的挑战；断电重启自动续连
+- 上报心跳（主机名/版本/网段/流量），执行管控指令：停用 / 启用 / 立即重连 / 立刻上报
+- 配置文件支持 `.srkey` 加密（文件密码），支持 `SR_KEYPASS` / `SR_AGENT_SERVER` 环境覆盖
 
-**🛡 Web 控制面（新）**：注册 / 登录（密码 + Google Authenticator 动态码）、设备密钥管理、实时总览。
-一套 `docker compose` 起全家桶：nginx + web + mariadb + 网关。
+### 🖥 Web 控制面
 
-**🔐 动态码连接**：客户端连接时需要输入实时动态验证码（MFA 在加密隧道内验证，码不裸奔、防重放），
-用错 3 次自动锁定并断开。
+- **站点 Agent 页**：实时状态（在线/认证中/离线/已停用）、流量、最后心跳、网段冲突告警；
+  启停、踢线重连、轮换动态码密钥、删除站点
+- **一键部署包**：下载 zip = 平台对应的 agent 二进制 + 加密配置（含站点私钥与动态码密钥）
+  + 中文部署说明（Linux systemd/容器、macOS）；每次下载换新密钥（旧包随即失效）
+- **客户端密钥**：勾选可访问站点 → 路由与服务端 ACL 同时落地；隧道地址自动分配；
+  设备列表可在线调整站点权限（立即生效）
+- 总览页展示服务端状态、站点与连接的汇总；控制面与中转服务端通过管控 API 解耦
 
-**🧾 加密密钥文件（.srkey）**：客户端配置在网页上生成后即以「文件密码」加密下载
-（argon2id + ChaCha20-Poly1305）；运行时先解文件密码、再输动态码。服务器只保存公钥。
+### 🧰 部署与分发
 
-**📊 连接状态**：连接后打印状态块（服务端主机、隧道、MFA 状态、流量），Ctrl+C 即刻断开并通知服务端。
+- 全家桶 compose：`nginx + web + mariadb + server + agent-home`（本机站点）
+- `init.sh` 生成 `server.json` 与控制面令牌；`agent-home` 首次启动会等待配置文件
+- web 镜像内置各平台 agent 二进制（CI 构建），部署包页面直接下载
+- 新增 e2e：`scripts/e2e-hub.sh`（三容器真内核全链路）、`scripts/e2e-control.sh`（控制面全流程）
 
-**♻️ 兼容**：纯命令行模式（不使用 Web 控制面、无 MFA）完全保留，见下方「服务端（命令行模式）」。
+## 兼容性
 
-## 下载
+- `sr gateway`（v0.2 直连模式）与老 `.srkey` 客户端配置**继续可用**（协议帧向后兼容）
+- MFA 校验规则微调：**同一时间步内允许重连复用同一动态码**（无人值守站点需要），
+  跨时间步仍然拒绝重放
+- 旧的 `gateway.json` 无需改动；新安装用 `server.json`
 
-| 我要… | 拿这个 |
-|---|---|
-| Mac 客户端 | `selfremote-macos-arm64`（Apple 芯片）/ `selfremote-macos-amd64`（Intel）/ `selfremote-macos.zip` 整包 |
-| Windows 客户端 | `selfremote-windows-amd64.exe` |
-| Linux 客户端 / 网关程序 | `selfremote-linux-amd64` / `selfremote-linux-arm64` |
-| 服务端镜像（在线） | `ghcr.io/zph0713/selfremote:latest`（网关）、`ghcr.io/zph0713/selfremote-web:latest`（控制面） |
-| 服务端镜像（离线） | `selfremote-image-linux-amd64.tar.gz`、`selfremote-web-image-linux-amd64.tar.gz`（`docker load -i`） |
+## 升级步骤（v0.2 → v0.3）
 
-## 快速开始
+1. 拉新镜像：`docker pull ghcr.io/zph0713/selfremote:latest` 与 `...-web:latest`
+2. `deploy/stack`：`cp .env.example .env`（新增 `SR_AGENT_KEYPASS`）→ `bash init.sh`（生成 `server.json`）
+3. `docker compose up -d`（服务名 `gateway` → `server`，compose 文件已更新）
+4. 网页：添加站点（本机站点 id=home，网段填你的内网）→ 下载部署包 → 把 `.srkey` 放到数据目录
+   → `docker compose up -d agent-home`
+5. 客户端：到「客户端密钥」重新生成 `.srkey`（勾选站点），替换 Mac 上的旧文件即可
 
-### 客户端（Mac）
+## 验证
 
-用 Web 控制面生成的 `client-*.srkey`：
-
-```sh
-sudo ./selfremote-macos-arm64 client -c client-yourname.srkey
-# 输入文件密码 → 输入 Google Authenticator 动态码 → 连上
-```
-
-（老式明文 `client.json` 同样支持；控制面未启用 MFA 时直接连接。）
-
-### 服务端（Web 控制面 · 推荐）
-
-```sh
-git clone https://github.com/zph0713/selfremote && cd selfremote/deploy/stack
-cp .env.example .env && vi .env        # 改数据库密码；可选 SERVER_ADDR / LAN_CIDRS
-bash init.sh                           # 生成网关密钥（一次）
-docker compose up -d                   # nginx + web + mariadb + gateway
-# 打开 http://<主机>:8080 → 注册管理员 → 绑定 Google Authenticator → 生成客户端密钥
-```
-
-### 服务端（命令行模式 · 无 Web 也可）
-
-```sh
-docker run -d --name selfremote-gw --restart unless-stopped \
-  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
-  --device /dev/net/tun:/dev/net/tun \
-  -v /etc/selfremote:/etc/selfremote \
-  ghcr.io/zph0713/selfremote:latest gateway -c /etc/selfremote/gateway.json
-```
-
-文档：仓库 `docs/` 目录（QUICKSTART-WEB / QUICKSTART-CLIENT / QUICKSTART-SERVER / DEPLOY-NAS / PROTOCOL）。
+- `go test ./...` 全绿（含中转/翻译/注册表/管控新测试）
+- `bash scripts/e2e-hub.sh` → `E2E_HUB_PASS`：客户端→服务端→站点→内网全链路，双 MFA、
+  地址翻译（ping + TCP）、停用/启用、踢线
+- `bash scripts/e2e-control.sh` → `E2E_CONTROL_PASS`：真数据库 + 真服务端 + 真页面流程，
+  站点创建、部署包结构校验、客户端站点权限、启停写入注册表
