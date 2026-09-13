@@ -21,3 +21,8 @@ client-*.json
 Thumbs.db
 .idea/
 .vscode/
+
+# 本地实验环境（含密码/公网地址）：只保留 .env.example
+.env
+deploy/stack/.env
+deploy/stack/data/

@@ -300,6 +300,10 @@ func (s *Server) handleRegisterPost(w http.ResponseWriter, r *http.Request) {
 	}
 	setSessionCookie(w, sid, expires)
 	log.Printf("admin user %s created", username)
+	// 首次部署：init.sh 预置的「本机站点」需要有个属主，管理员一出现就导入。
+	if err := s.ImportPreprovision(ctx); err != nil {
+		log.Printf("preprovision: %v", err)
+	}
 	redirectMsg(w, r, "/settings?enroll=1", "管理员账号已创建，请先绑定 Google Authenticator", "")
 }
 

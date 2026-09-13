@@ -16,11 +16,11 @@ import (
 	"time"
 )
 
-//go:embed templates/*.html static/*
+//go:embed templates/*.html static/* assets/*
 var assets embed.FS
 
 // Version is the control-plane version (displayed in the UI).
-const Version = "0.3.0"
+const Version = "0.4.0"
 
 // Config configures the control-plane server.
 type Config struct {
@@ -39,10 +39,11 @@ type Config struct {
 
 // Server is the web control plane.
 type Server struct {
-	cfg   Config
-	db    *sql.DB
-	pages map[string]*template.Template
-	limit *loginLimiter
+	cfg           Config
+	db            *sql.DB
+	pages         map[string]*template.Template
+	limit         *loginLimiter
+	enrollLimiter *enrollLimiter
 }
 
 // New opens the database, applies the schema and prepares templates.
@@ -66,7 +67,7 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	if err := migrate(ctx, db); err != nil {
 		return nil, fmt.Errorf("database: %w", err)
 	}
-	s := &Server{cfg: cfg, db: db, limit: newLoginLimiter()}
+	s := &Server{cfg: cfg, db: db, limit: newLoginLimiter(), enrollLimiter: newEnrollLimiter()}
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
 	}
@@ -83,6 +84,7 @@ func (s *Server) parseTemplates() error {
 	funcs := template.FuncMap{
 		"human_bytes": humanBytes,
 		"since":       humanSince,
+		"ts":          func(t time.Time) string { return t.Format(time.RFC3339) },
 		"v":           func() string { return Version },
 		"hasSite":     hasSite,
 	}
@@ -113,6 +115,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /register", s.handleRegisterPost)
 	mux.HandleFunc("POST /logout", s.auth(s.handleLogout))
 
+	// 装机接入（公开）：一次性安装码 + 安装脚本 + agent 二进制。
+	mux.HandleFunc("POST /api/enroll", s.handleEnroll)
+	mux.HandleFunc("GET /install.sh", s.handleInstallScript)
+	mux.HandleFunc("GET /agent-dist/{name}", s.handleAgentDist)
+
 	mux.HandleFunc("GET /{$}", s.auth(s.handleDashboard))
 	mux.HandleFunc("GET /settings", s.auth(s.handleSettings))
 	mux.HandleFunc("POST /settings/mfa/begin", s.auth(s.handleMFABegin))
@@ -135,6 +142,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /agents/{id}/rotate-mfa", s.authMFA(s.handleAgentRotateMFA))
 	mux.HandleFunc("POST /agents/{id}/revoke", s.authMFA(s.handleAgentRevoke))
 	mux.HandleFunc("POST /agents/{id}/package", s.authMFA(s.handleAgentPackage))
+	mux.HandleFunc("POST /agents/{id}/code", s.authMFA(s.handleAgentNewCode))
+	mux.HandleFunc("POST /agents/route-mode", s.authMFA(s.handleRouteMode))
 
 	mux.HandleFunc("GET /users", s.authAdmin(s.handleUsers))
 	mux.HandleFunc("POST /users/new", s.authAdmin(s.handleUserCreate))
@@ -353,6 +362,9 @@ func (s *Server) syncAgents(ctx context.Context) error {
 	}
 	out := agentRegistryFile{Agents: make([]registryAgent, 0, len(agents))}
 	for _, a := range agents {
+		if a.PublicKey == "" {
+			continue // 还没接入（等待安装脚本 enroll）：不发布给 server
+		}
 		routes := make([]registryAgentRoute, 0, len(a.Routes))
 		for _, r := range a.Routes {
 			routes = append(routes, registryAgentRoute{Real: r.Real, Virtual: r.Virtual})

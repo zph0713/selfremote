@@ -185,7 +185,8 @@ func (e *Engine) handleAuthChallenge(p *peerState, pt []byte) {
 		// configuration. The server still gets a time-bound, replay-protected
 		// proof that the agent holds that secret.
 		if e.opts.MFASecret == "" {
-			e.fail(errors.New("服务端要求 MFA 动态码，但本机 agent 配置里没有 mfa_secret —— 请在网页端重新生成并下载配置文件"))
+			e.fail(errors.New("服务端要求 MFA 动态码，但本机 agent 配置里没有 mfa_secret" +
+				"（v0.4 起站点默认不使用动态码：请在控制面重新生成安装码并重装该站点，或清空服务端该站点的 totp_secret）"))
 			return
 		}
 		code, err := totp.GenerateCode(e.opts.MFASecret, time.Now())

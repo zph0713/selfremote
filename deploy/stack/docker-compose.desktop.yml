@@ -1,23 +1,29 @@
 # Docker Desktop 测试覆盖文件：主机网络 → 桥接 + 发布端口
-# （Docker Desktop 的 host 网络 = 虚拟机 netns，外部入站与发布端口都会失效）
+# （Docker Desktop 的 host 网络是虚拟机 netns，外部入站与发布端口都会失效）
 #
 # 用法：
 #   docker compose -f docker-compose.yml -f docker-compose.desktop.yml up -d
 #
-# 本机站点（agent-home）在桌面版里跑在 VM 网络里，只能服务 VM 网段；
-# 要在桌面机上验证完整链路（client → server → agent → 站点内网）请用
-# scripts/e2e-hub.sh（全容器拓扑）。
+# 本机站点（agent-home）在桌面版里跑在 VM 网络里：它经 NAT 能访问宿主所在的内网，
+# 所以「站点 = 这台机器所在的内网」依然成立，可以在本机做完整链路验证
+# （client → server → agent-home → 宿主内网）。
 services:
+  # 中转服务端改成桥接：UDP 与管控 API 通过发布端口暴露给宿主/外部客户端
   server:
     network_mode: bridge
     ports:
       - "${TUNNEL_PORT:-28333}:${TUNNEL_PORT:-28333}/udp"
-      - "127.0.0.1:${API_PORT:-8770}:8770"
+      - "${API_PORT:-8770}:8770"
 
+  # 控制面走宿主发布端口访问管控 API（桥接网络里没有服务名 DNS，server 不在同一网络）
+  web:
+    environment:
+      SRV_API_URL: "http://host.docker.internal:${API_PORT:-8770}"
+
+  # 站点同样是桥接 + 宿主发布端口（默认 docker0 桥没有 compose 的服务名 DNS）
   agent-home:
     network_mode: bridge
     sysctls:
       - net.ipv4.ip_forward=1
     environment:
-      # 桥接网络里通过服务名找到中转服务端
-      SR_AGENT_SERVER_OVERRIDE: "server:${TUNNEL_PORT:-28333}"
+      SR_AGENT_SERVER_OVERRIDE: "host.docker.internal:${TUNNEL_PORT:-28333}"

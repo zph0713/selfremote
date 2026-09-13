@@ -100,6 +100,27 @@ docker run -d --name selfremote-server --restart unless-stopped \
 
 （模板见 `deploy/examples/agent.json.example`；用 Web 控制面时会下发加密的 `.srkey`）
 
+### 5a. 推荐：用控制面的安装命令（v0.4）
+
+```sh
+# 控制面「站点 Agent」页创建站点后，页面会给出这条命令：
+curl -fsSL http://<控制面>:8080/install.sh | sudo bash -s -- --code ABCD-EFGH
+```
+
+脚本流程：下载 agent 二进制（从控制面）→ `sr agent enroll`（本地生成密钥对，用安装码换
+注册：隧道地址 / 服务端公钥 / 网段映射）→ 写配置（`/opt/selfremote/agent.json`，600）
+→ 装 systemd 服务或 `--docker` 起容器。常用参数：`--docker`、`--routes 192.168.1.0/24,10.0.0.0/8`、
+`--tunnel host:port`、`--no-service`（只接入）、`--uninstall`。
+
+也可以手工等价地做：
+
+```sh
+sr agent enroll --server http://<控制面>:8080 --code ABCD-EFGH -o /etc/selfremote/agent.json
+sr agent -c /etc/selfremote/agent.json
+```
+
+### 5b. 手工配置（无控制面）
+
 ```json
 {
   "id": "home",
@@ -108,10 +129,12 @@ docker run -d --name selfremote-server --restart unless-stopped \
   "private_key": "（站点自己的 genkey private_key）",
   "server_public_key": "（第 2 步的服务端 public_key）",
   "tunnel_cidr": "10.77.0.100/24",
-  "mfa_secret": "（与服务端 agents.json 里一致的 Base32 密钥）",
   "routes": [ { "real": "192.168.1.0/24", "virtual": "10.200.7.0/24" } ]
 }
 ```
+
+> v0.4 起站点**不再需要** `mfa_secret`（认证靠密钥对）；`agents.json` 里对应站点也不要填
+> `totp_secret`，否则服务端会要求动态码。
 
 ```sh
 docker run -d --name selfremote-agent --restart unless-stopped \
@@ -122,8 +145,7 @@ docker run -d --name selfremote-agent --restart unless-stopped \
 ```
 
 站点宿主上必须开启 IPv4 转发（`sysctl -w net.ipv4.ip_forward=1`，群晖用「任务计划 → 开机」）；
-转发与 SNAT 规则由容器 entrypoint 幂等配置。裸机运行二进制时自行配置：
-`iptables -t nat -A POSTROUTING -s 10.77.0.0/24 ! -o sr0 -j MASQUERADE`。
+Linux 上的转发与 SNAT 规则由 agent 自己幂等配置（`--no-net-setup` 可关掉自己配）。
 
 ## 6. 验证
 

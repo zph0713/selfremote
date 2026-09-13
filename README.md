@@ -41,17 +41,17 @@ docker compose up -d    # nginx + web + mariadb + server
 
 ### 🌐 站点（Agent，任意能访问目标内网的机器）
 
-在 Web 页面「站点 Agent」里创建站点 → 下载部署包（含二进制 + 加密配置 + 中文说明）→
-在那台机器上运行即可（可位于 NAT 后；只需要出站 UDP）。容器方式：
+网页「站点 Agent」创建站点后，页面会给出一行安装命令 —— 在目标机器上（root）执行即可：
 
 ```sh
-docker run -d --name selfremote-agent --restart unless-stopped \
-  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
-  --device /dev/net/tun --sysctl net.ipv4.ip_forward=1 \
-  -e SR_KEYPASS='<部署包文件密码>' \
-  -v /opt/selfremote-agent:/etc/selfremote \
-  ghcr.io/zph0713/selfremote:latest agent -c /etc/selfremote/<站点id>.srkey
+curl -fsSL http://<控制面>:8080/install.sh | sudo bash -s -- --code ABCD-EFGH   # 末尾加 --docker 走容器方式
 ```
+
+脚本会下载 agent、用一次性安装码换注册（**密钥在目标机器上生成**）、装成开机自启的服务。
+站点主动拨号接入，**可位于 NAT 后，不需要任何入站端口**。本机站点由初次部署的
+`init.sh` + compose 自带，无需这一步。
+
+> 完全不联网的目标机器：用站点详情页里的「离线部署包（zip）」，拷过去按 README 运行。
 
 ## 文档
 

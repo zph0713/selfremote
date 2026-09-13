@@ -45,29 +45,32 @@
     {{end}}
   </table>
   {{else}}
-  <p class="muted">还没有站点：<a href="/agents/new">添加一个</a>，下载部署包放到能访问目标内网的机器上运行，它就会拨号接入。</p>
+  <p class="muted">还没有站点：<a href="/agents/new">添加一个</a>，然后在目标机器上执行页面给出的安装命令，它就会拨号接入。</p>
   {{end}}
 </div>
 
 <div class="card">
-  <h2>当前连接</h2>
-  {{if .Data.Hub}}
-    {{if .Data.Hub.Peers}}
-    <table>
-      <tr><th>名称</th><th>角色</th><th>来源</th><th>MFA</th><th>已连接</th><th>流量 ↓ / ↑</th><th>最近活动</th></tr>
-      {{range .Data.Hub.Peers}}
-      <tr>
-        <td>{{.Name}}{{if .ID}}<div class="muted small mono">{{.ID}}</div>{{end}}</td>
-        <td>{{if eq .Role "agent"}}站点{{else}}客户端{{end}}</td>
-        <td class="mono">{{.Remote}}</td>
-        <td>{{if .Authed}}<span class="dot ok"></span>已通过{{else if .Connected}}<span class="dot warn"></span>待验证{{else}}<span class="muted">—</span>{{end}}</td>
-        <td>{{if .Connected}}{{since .Since}}{{else}}<span class="muted">离线</span>{{end}}</td>
-        <td>{{human_bytes .TxBytes}} / {{human_bytes .RxBytes}}</td>
-        <td>{{since .LastRecv}}</td>
-      </tr>
-      {{end}}
-    </table>
-    {{else}}<p class="muted">暂无连接。</p>{{end}}
+  <h2>客户端连接</h2>
+  {{if .Data.ClientPeers}}
+  <table>
+    <tr><th>设备</th><th>归属</th><th>隧道地址</th><th>来源</th><th>MFA</th><th>已连接</th><th>流量 ↓ / ↑</th><th>最近活动</th></tr>
+    {{range .Data.ClientPeers}}
+    <tr>
+      <td>{{.Name}}{{if .ID}}<div class="muted small mono">{{.ID}}</div>{{end}}</td>
+      <td>{{if .Owner}}{{.Owner}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="mono">{{if .TunnelIP}}{{.TunnelIP}}{{else}}<span class="muted">—</span>{{end}}</td>
+      <td class="mono">{{.Remote}}</td>
+      <td>{{if .Authed}}<span class="dot ok"></span>已通过{{else if .Connected}}<span class="dot warn"></span>待验证{{else}}<span class="muted">—</span>{{end}}</td>
+      <td>{{if .Connected}}{{since .Since}}{{else}}<span class="muted">离线</span>{{end}}</td>
+      <td>{{human_bytes .RxBytes}} / {{human_bytes .TxBytes}}</td>
+      <td>{{since .LastRecv}}</td>
+    </tr>
+    {{end}}
+  </table>
+  <p class="muted small">站点（Agent）侧的连接看上方「站点」表；两边的实时状态都来自中转服务端。</p>
+  {{else if .Data.Hub}}
+  <p class="muted">暂无客户端连接。到 <a href="/devices">客户端密钥</a> 生成一个 <code>.srkey</code>，
+     在设备上运行 <code>sudo sr client -c client-xxx.srkey</code>（输入文件密码 + 动态码）即可接入。</p>
   {{else if .Data.Status.Peers}}
   <table>
     <tr><th>设备</th><th>用户</th><th>来源</th><th>MFA</th><th>连接时长</th><th>流量 ↑ / ↓</th><th>最近活动</th></tr>
@@ -106,7 +109,8 @@
   <h2>下载与部署</h2>
   <p><b>客户端</b>（Mac / Windows / Linux）：<a href="https://github.com/zph0713/selfremote/releases" target="_blank" rel="noreferrer">GitHub Releases</a>
      —— 配合本页「客户端密钥」中生成的 <code>.srkey</code> 文件使用。</p>
-  <p><b>站点 Agent</b>：在本页「站点 Agent」里创建站点后即可直接下载部署包（含二进制 + 加密配置 + 部署说明）。</p>
+  <p><b>站点 Agent</b>：在「站点 Agent」里创建站点后，把页面给出的安装命令粘到目标机器上执行即可
+     （一行搞定；不联网的机器可用「离线部署包」）。</p>
   <p><b>服务端</b>（中转 + 控制面，推荐 compose 全家桶）：<code>ghcr.io/zph0713/selfremote:latest</code>（离线镜像包、部署文档同在 Releases 页）。</p>
   <p>单机最小部署（中转服务端，无需 TUN / 特权）：</p>
   <pre><code>docker run -d --name selfremote-server --restart unless-stopped \

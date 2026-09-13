@@ -28,7 +28,7 @@ import (
 	"selfremote/internal/tunnel"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -44,6 +44,8 @@ func main() {
 		err = cmdServer(args)
 	case "agent":
 		err = cmdAgent(args)
+	case "pubkey":
+		err = cmdPubkey(args)
 	case "gateway":
 		err = cmdGateway(args)
 	case "client":
@@ -67,14 +69,17 @@ func usage() {
 
 usage:
   sr server  -c <file>      run the hub: relays clients to site agents (no TUN needed)
+  sr agent enroll --server <url> --code <安装码> -o <file>
+                            join a control plane with a one-time install code
+                            (mints the keypair locally, writes the config)
   sr agent   -c <file>      run a site edge: dials the hub, serves a LAN
                             <file> may be an encrypted key file (.srkey)
-                            downloaded from the web UI
   sr gateway -c <file>      run a standalone gateway (direct clients, no hub)
   sr client  -c <file>      run as client (on the Mac)
                             <file> may be an encrypted key file (.srkey)
                             downloaded from the web UI
   sr genkey                 generate an X25519 key pair (base64)
+  sr pubkey  -c <file>      print the public key of a config file
   sr version
 `)
 }

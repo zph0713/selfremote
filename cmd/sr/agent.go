@@ -19,10 +19,15 @@ import (
 // colliding subnets can coexist). The configuration is normally an encrypted
 // .srkey downloaded from the web control plane.
 func cmdAgent(args []string) error {
+	// 子命令：接入（一次性安装码换注册）
+	if len(args) > 0 && args[0] == "enroll" {
+		return cmdAgentEnroll(args[1:])
+	}
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	cfgPath := fs.String("c", "", "path to agent config file (json, or an encrypted .srkey)")
 	kpass := fs.String("kpass", "", "key-file passphrase (automation; prefer the interactive prompt)")
 	mfaSecret := fs.String("mfa-secret", "", "override the TOTP secret (automation; normally inside the config)")
+	noNetSetup := fs.Bool("no-net-setup", false, "跳过 Linux 转发/SNAT 配置（自行配置时使用；容器里由 entrypoint 配置）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -32,7 +37,17 @@ func cmdAgent(args []string) error {
 
 	raw, err := os.ReadFile(*cfgPath)
 	if err != nil {
-		return err
+		// 容器/脚本首启：给了安装码就先接入，再继续。
+		if os.Getenv("SR_ENROLL_CODE") != "" && os.Getenv("SR_ENROLL_SERVER") != "" {
+			fmt.Println("未找到配置文件，检测到 SR_ENROLL_CODE —— 先完成接入")
+			if eErr := cmdAgentEnroll([]string{"-o", *cfgPath}); eErr != nil {
+				return eErr
+			}
+			raw, err = os.ReadFile(*cfgPath)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if keyfile.IsEnvelope(raw) {
 		pass := *kpass
@@ -102,6 +117,12 @@ func cmdAgent(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// 站点要能把隧道流量转进本机内网：Linux 上开 ip_forward + 装 SNAT/转发规则
+	// （幂等、尽力而为；容器方式由镜像 entrypoint 做同样的事）。
+	if !*noNetSetup {
+		tunnel.SetupSiteForwarding(cfg.TunnelCIDR)
+	}
 
 	// Bridge networks reach the hub by compose service name, not loopback.
 	name := cfg.Name

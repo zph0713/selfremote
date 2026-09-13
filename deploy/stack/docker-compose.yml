@@ -74,8 +74,8 @@ services:
       - ${SR_CONFIG_DIR:-./data}:/etc/selfremote
     command: ["server", "-c", "/etc/selfremote/server.json"]
 
-  # 本机站点（NAS 自己所在的内网）：agent 形态与远程站点完全一致，
-  # 只是配置指向 127.0.0.1。不需要这个内网时可删掉本服务。
+  # 本机站点（NAS 自己所在的内网）：由 init.sh 预置密钥与配置，起来就是在线状态，
+  # 不需要登录网页手工建站。不需要这个内网时可删掉本服务。
   agent-home:
     image: ${SR_IMAGE:-ghcr.io/zph0713/selfremote:latest}
     restart: unless-stopped
@@ -84,11 +84,12 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      SR_KEYPASS: ${SR_AGENT_KEYPASS:?请在 .env 设置 SR_AGENT_KEYPASS（本机站点配置文件密码）}
       SR_TUNNEL_CIDR: ${SR_TUNNEL_CIDR:-10.77.0.0/24}
+      # 容器里要连宿主上的 server（默认配置写的是 127.0.0.1）
+      SR_AGENT_SERVER_OVERRIDE: ${SR_AGENT_SERVER_OVERRIDE:-}
     volumes:
       - ${SR_CONFIG_DIR:-./data}:/etc/selfremote
-    command: ["agent", "-c", "/etc/selfremote/agent-home.srkey"]
+    command: ["agent", "-c", "/etc/selfremote/agent-home.json"]
     depends_on:
       - server
 

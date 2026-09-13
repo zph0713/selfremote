@@ -71,6 +71,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("init: %v", err)
 	}
+	// 初次部署时 init.sh 会把「本机站点」预置在 data/preprovision/ 下；
+	// 这里导入（此时可能还没有管理员账号，注册流程里会再试一次）。
+	if err := srv.ImportPreprovision(ctx); err != nil {
+		log.Printf("preprovision: %v", err)
+	}
+	if err := srv.ApplyV04Migrations(ctx); err != nil {
+		log.Printf("v0.4 迁移: %v", err)
+	}
 
 	httpSrv := &http.Server{
 		Addr:              *listen,

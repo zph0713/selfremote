@@ -15,12 +15,28 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/flynn/noise"
 	"github.com/pquerna/otp/totp"
 
 	"selfremote/internal/keyfile"
 )
+
+// humanUntil renders "还有多久过期" for install codes.
+func humanUntil(t time.Time) string {
+	if t.IsZero() {
+		return "长期有效"
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "已过期"
+	}
+	if d < time.Minute {
+		return "不到 1 分钟"
+	}
+	return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+}
 
 // Site agents (v0.3): what the hub relays to. The control plane owns the
 // registry (agents.json), the agent's deployment package and the operator
@@ -75,14 +91,19 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request, u *User) {
 	if view.Status != nil {
 		conflicts = view.Status.Conflicts
 	}
+	mode := normalizeRouteMode(s.getSetting(ctx, routeModeKey, routeModeAuto))
 	s.render(w, r, "agents.html", pageData{
 		Title:       "站点 Agent",
 		AutoRefresh: true,
 		Data: map[string]any{
-			"Agents":       rows,
-			"HubReachable": view.Reachable,
-			"IsAdmin":      u.IsAdmin,
-			"Conflicts":    conflicts,
+			"Agents":         rows,
+			"HubReachable":   view.Reachable,
+			"IsAdmin":        u.IsAdmin,
+			"Conflicts":      conflicts,
+			"RouteMode":      mode,
+			"RouteModeLabel": routeModeLabel(mode),
+			"InstallerOK":    s.installerReady(),
+			"WebBase":        "http://" + r.Host,
 		},
 	})
 }
@@ -165,21 +186,22 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request, u *Us
 		redirectMsg(w, r, "/agents/new", "", "内部错误")
 		return
 	}
+	// 网段映射：作者手工指定的优先，其余按 server 的路由模式（auto/real/virtual）
+	routes, err = s.assignRoutes(ctx, routes, nil)
+	if err != nil {
+		redirectMsg(w, r, "/agents/new", "", err.Error())
+		return
+	}
 	if err := validateRouteSet(routes, agents, nil); err != nil {
 		redirectMsg(w, r, "/agents/new", "", err.Error())
 		return
 	}
 
-	// Keypair + per-agent MFA secret (auto-answered by the agent itself).
-	cs := noise.NewCipherSuite(noise.DH25519, noise.CipherChaChaPoly, noise.HashBLAKE2s)
-	kp, err := cs.GenerateKeypair(rand.Reader)
+	// v0.4：站点不再由控制面预生成密钥，而是给一个一次性安装码；
+	// 目标机器跑安装脚本时现场生成密钥并接入（server 与站点之间此后只认密钥）。
+	code, err := newInstallCode()
 	if err != nil {
-		redirectMsg(w, r, "/agents/new", "", "生成密钥失败")
-		return
-	}
-	secret, err := newTOTPSecret()
-	if err != nil {
-		redirectMsg(w, r, "/agents/new", "", "生成动态码密钥失败")
+		redirectMsg(w, r, "/agents/new", "", "生成安装码失败")
 		return
 	}
 	tunnelIP, err := s.allocAgentIP(ctx)
@@ -188,25 +210,26 @@ func (s *Server) handleAgentCreate(w http.ResponseWriter, r *http.Request, u *Us
 		return
 	}
 	a := &Agent{
-		UserID:     u.ID,
-		AgentID:    agentID,
-		Name:       name,
-		PublicKey:  base64.StdEncoding.EncodeToString(kp.Public),
-		TunnelIP:   tunnelIP,
-		TOTPSecret: secret,
-		Enabled:    true,
-		Routes:     routes,
+		UserID:        u.ID,
+		AgentID:       agentID,
+		Name:          name,
+		TunnelIP:      tunnelIP,
+		TOTPSecret:    "",
+		Enabled:       true,
+		Routes:        routes,
+		EnrollCode:    code,
+		EnrollExpires: time.Now().Add(installCodeTTL),
 	}
 	if err := s.addAgent(ctx, a); err != nil {
 		log.Printf("addAgent %s: %v", agentID, err)
 		redirectMsg(w, r, "/agents/new", "", "保存失败（Agent ID 或公钥重复）")
 		return
 	}
-	if err := s.syncRegistries(ctx); err != nil {
-		log.Printf("sync registries: %v", err)
+	if err := s.syncAgents(ctx); err != nil {
+		log.Printf("sync agents: %v", err)
 	}
-	log.Printf("user %s: agent %q created (site %s, tunnel %s)", u.Username, agentID, routesText(routes), tunnelIP)
-	redirectMsg(w, r, "/agents/"+agentID, "站点已创建：下载部署包并在一台机器上运行，它就会拨号接入", "")
+	log.Printf("user %s: agent %q created (site %s, tunnel %s, pending enroll)", u.Username, agentID, routesText(routes), tunnelIP)
+	redirectMsg(w, r, "/agents/"+agentID, "站点已创建：在目标机器上执行页面里的安装命令即可接入", "")
 }
 
 // handleAgentShow renders one site: live state, routes, deployment and the
@@ -232,6 +255,7 @@ func (s *Server) handleAgentShow(w http.ResponseWriter, r *http.Request, u *User
 		plats = append(plats, agentPlatRow{Key: p.Key, Label: p.Label, OK: err == nil, Binary: p.Binary})
 	}
 	_, srvErr := s.hubPubKey()
+	codeValid := a.EnrollCode != "" && (a.EnrollExpires.IsZero() || time.Now().Before(a.EnrollExpires))
 	s.render(w, r, "agent_show.html", pageData{
 		Title: "站点 " + a.Name,
 		Data: map[string]any{
@@ -243,8 +267,96 @@ func (s *Server) handleAgentShow(w http.ResponseWriter, r *http.Request, u *User
 			"Platforms":    plats,
 			"DistReady":    anyPlatformReady(plats),
 			"KeyProblem":   errText(srvErr),
+			"Pending":      a.Pending(),
+			"CodeValid":    codeValid,
+			"CodeTTL":      humanUntil(a.EnrollExpires),
+			"InstallCmd":   installCommand(r, a),
+			"DockerCmd":    installCommandDocker(r, a),
+			"WebBase":      "http://" + r.Host,
+			"RouteMode":    normalizeRouteMode(s.getSetting(ctx, routeModeKey, routeModeAuto)),
+			"InstallerOK":  s.installerReady(),
 		},
 	})
+}
+
+// installerReady reports whether this control-plane image ships an installer
+// script plus at least one agent binary (the official image does).
+func (s *Server) installerReady() bool {
+	if _, err := assets.ReadFile("assets/install.sh"); err != nil {
+		return false
+	}
+	for name := range agentDistFiles {
+		if fileExists(filepath.Join(s.cfg.AgentDistDir, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+// installCommand renders the one-liner an operator pastes on the target machine.
+func installCommand(r *http.Request, a *Agent) string {
+	base := "http://" + r.Host
+	cmd := fmt.Sprintf("curl -fsSL %s/install.sh | sudo bash -s -- --code %s", base, a.EnrollCode)
+	if len(a.Routes) == 0 {
+		cmd += " --routes 192.168.1.0/24"
+	}
+	return cmd
+}
+
+func installCommandDocker(r *http.Request, a *Agent) string {
+	return installCommand(r, a) + " --docker"
+}
+
+// handleAgentNewCode rotates the one-time install code and detaches whatever
+// machine was enrolled before (a fresh install must be run on the new host).
+func (s *Server) handleAgentNewCode(w http.ResponseWriter, r *http.Request, u *User) {
+	ctx := r.Context()
+	if !checkCSRF(r, sessFrom(r)) {
+		redirectMsg(w, r, "/agents", "", "表单校验失败，请重试")
+		return
+	}
+	a, err := s.agentByAgentID(ctx, r.PathValue("id"))
+	if err != nil || a == nil {
+		http.Error(w, "站点不存在", http.StatusNotFound)
+		return
+	}
+	if a.UserID != u.ID && !u.IsAdmin {
+		http.Error(w, "无权操作他人站点", http.StatusForbidden)
+		return
+	}
+	code, err := newInstallCode()
+	if err != nil {
+		redirectMsg(w, r, "/agents/"+a.AgentID, "", "生成安装码失败")
+		return
+	}
+	if err := s.resetAgentKey(ctx, a.ID); err != nil {
+		redirectMsg(w, r, "/agents/"+a.AgentID, "", "重置站点密钥失败")
+		return
+	}
+	if err := s.setAgentEnrollCode(ctx, a.ID, code, time.Now().Add(installCodeTTL)); err != nil {
+		redirectMsg(w, r, "/agents/"+a.AgentID, "", "保存安装码失败")
+		return
+	}
+	if err := s.syncAgents(ctx); err != nil {
+		log.Printf("sync agents: %v", err)
+	}
+	log.Printf("user %s: agent %q install code rotated (previous key detached)", u.Username, a.AgentID)
+	redirectMsg(w, r, "/agents/"+a.AgentID, "已生成新安装码：在原机器上重新执行安装命令即可（旧机器已失效）", "")
+}
+
+// handleRouteMode switches how sites are presented to clients.
+func (s *Server) handleRouteMode(w http.ResponseWriter, r *http.Request, u *User) {
+	if !checkCSRF(r, sessFrom(r)) {
+		redirectMsg(w, r, "/agents", "", "表单校验失败，请重试")
+		return
+	}
+	mode := normalizeRouteMode(r.FormValue("mode"))
+	if err := s.setSetting(r.Context(), routeModeKey, mode); err != nil {
+		redirectMsg(w, r, "/agents", "", "保存失败")
+		return
+	}
+	log.Printf("user %s: route mode -> %s", u.Username, mode)
+	redirectMsg(w, r, "/agents", "路由模式已切换为「"+routeModeLabel(mode)+"」（对之后创建/修改的站点生效）", "")
 }
 
 func errText(err error) string {
@@ -461,12 +573,12 @@ func (s *Server) handleAgentPackage(w http.ResponseWriter, r *http.Request, u *U
 		return
 	}
 	pubB64 := base64.StdEncoding.EncodeToString(kp.Public)
-	if err := s.updateAgentPublicKey(ctx, a.ID, pubB64); err != nil {
+	if err := s.bindAgentEnrollment(ctx, a.ID, pubB64); err != nil {
 		redirectMsg(w, r, "/agents/"+a.AgentID, "", "更新站点公钥失败")
 		return
 	}
-	if err := s.syncRegistries(ctx); err != nil {
-		log.Printf("sync registries: %v", err)
+	if err := s.syncAgents(ctx); err != nil {
+		log.Printf("sync agents: %v", err)
 	}
 
 	cfgJSON, err := json.MarshalIndent(map[string]any{

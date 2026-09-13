@@ -3,6 +3,7 @@ package webapp
 import (
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -37,6 +38,13 @@ type netInfoFile struct {
 		Up        bool     `json:"up"`
 		Addresses []string `json:"addresses"`
 	} `json:"interfaces"`
+}
+
+// peerRow is a hub peer enriched with control-plane knowledge (the owner of a
+// client device, so the dashboard can show "who is connected").
+type peerRow struct {
+	hubAgent
+	Owner string
 }
 
 // userRow is the admin user list entry.
@@ -83,6 +91,27 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, u *User
 		liveAgents = append(liveAgents, agentRow{Agent: a, Live: live, Routes: routes})
 	}
 
+	// 客户端连接：把 hub 报的 peer 与本地设备表对上（设备名 → 归属用户），
+	// 首页只关心「谁在用」，站点状态在上面的站点表里单独看。
+	owners := map[string]string{}
+	for _, d := range devs {
+		owners[d.Name] = d.Username
+	}
+	clientPeers := make([]peerRow, 0, 4)
+	agentPeers := make([]peerRow, 0, 4)
+	if hub.Status != nil {
+		for _, p := range hub.Status.Peers {
+			row := peerRow{hubAgent: p, Owner: owners[p.Name]}
+			if p.Role == "agent" {
+				agentPeers = append(agentPeers, row)
+			} else {
+				clientPeers = append(clientPeers, row)
+			}
+		}
+	}
+	sort.Slice(clientPeers, func(i, j int) bool { return clientPeers[i].Name < clientPeers[j].Name })
+	sort.Slice(agentPeers, func(i, j int) bool { return agentPeers[i].Name < agentPeers[j].Name })
+
 	statusAge := ""
 	if !statusAt.IsZero() {
 		statusAge = fmt.Sprintf("%.0f 秒前", time.Since(statusAt).Seconds())
@@ -105,6 +134,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, u *User
 			"Hub":         hub.Status,
 			"HubUp":       hub.Reachable,
 			"IsAdmin":     u.IsAdmin,
+			"ClientPeers": clientPeers,
+			"AgentPeers":  agentPeers,
 			"RelayLayout": true,
 		},
 	})

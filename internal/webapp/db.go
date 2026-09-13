@@ -56,20 +56,28 @@ func (r AgentRoute) Effective() string {
 	return r.Real
 }
 
-// Agent is one site edge registered in the control plane.
+// Agent is one site edge registered in the control plane. A freshly created
+// site has no public key yet: it is "pending" until a machine enrolls with the
+// install code (or an offline package takes over with a generated key).
 type Agent struct {
-	ID         int64
-	UserID     int64
-	AgentID    string // slug used in ACLs and the agent registry
-	Name       string
-	PublicKey  string // base64
-	TunnelIP   string // its own address on the tunnel network
-	TOTPSecret string
-	Enabled    bool
-	Routes     []AgentRoute
-	CreatedAt  time.Time
-	Username   string
+	ID            int64
+	UserID        int64
+	AgentID       string // slug used in ACLs and the agent registry
+	Name          string
+	PublicKey     string // base64; empty while pending
+	TunnelIP      string // its own address on the tunnel network
+	TOTPSecret    string // legacy (v0.3); new sites authenticate by install code + keypair
+	Enabled       bool
+	Routes        []AgentRoute
+	EnrollCode    string // one-time install code
+	EnrollExpires time.Time
+	EnrolledAt    time.Time
+	CreatedAt     time.Time
+	Username      string
 }
+
+// Pending reports whether the site is still waiting for its first machine.
+func (a *Agent) Pending() bool { return a.PublicKey == "" }
 
 // Session is a web login session.
 type Session struct {
@@ -143,6 +151,17 @@ CREATE TABLE IF NOT EXISTS agents (
 
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS tunnel_ip VARCHAR(45) NOT NULL DEFAULT '';
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS agents_json TEXT NULL;
+
+-- v0.4: 站点改为「先创建 → 装机脚本 enroll」流程，公钥在接入时才产生。
+ALTER TABLE agents MODIFY public_key VARCHAR(64) NULL;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS enroll_code VARCHAR(32) NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS enroll_expires DATETIME NULL;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS enrolled_at DATETIME NULL;
+
+CREATE TABLE IF NOT EXISTS settings (
+  k VARCHAR(64) PRIMARY KEY,
+  v VARCHAR(255) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `
 
 func openDB(dsn string) (*sql.DB, error) {
@@ -448,7 +467,8 @@ func (s *Server) registryRows(ctx context.Context) ([]RegistryRow, error) {
 
 // ---------------------------------------------------------------- agents
 
-const agentCols = `a.id, a.user_id, a.agent_id, a.name, a.public_key, a.tunnel_ip, a.totp_secret, a.enabled, a.routes_json, a.created_at, u.username`
+const agentCols = `a.id, a.user_id, a.agent_id, a.name, a.public_key, a.tunnel_ip, a.totp_secret, a.enabled, a.routes_json,
+	a.enroll_code, a.enroll_expires, a.enrolled_at, a.created_at, u.username`
 
 func scanAgents(rows *sql.Rows) ([]Agent, error) {
 	defer rows.Close()
@@ -457,9 +477,19 @@ func scanAgents(rows *sql.Rows) ([]Agent, error) {
 		var a Agent
 		var enabled int
 		var routesJSON string
-		if err := rows.Scan(&a.ID, &a.UserID, &a.AgentID, &a.Name, &a.PublicKey, &a.TunnelIP,
-			&a.TOTPSecret, &enabled, &routesJSON, &a.CreatedAt, &a.Username); err != nil {
+		var pub sql.NullString
+		var expires, enrolled sql.NullTime
+		if err := rows.Scan(&a.ID, &a.UserID, &a.AgentID, &a.Name, &pub, &a.TunnelIP,
+			&a.TOTPSecret, &enabled, &routesJSON,
+			&a.EnrollCode, &expires, &enrolled, &a.CreatedAt, &a.Username); err != nil {
 			return nil, err
+		}
+		a.PublicKey = pub.String
+		if expires.Valid {
+			a.EnrollExpires = expires.Time
+		}
+		if enrolled.Valid {
+			a.EnrolledAt = enrolled.Time
 		}
 		a.Enabled = enabled != 0
 		if err := json.Unmarshal([]byte(routesJSON), &a.Routes); err != nil {
@@ -520,14 +550,80 @@ func (s *Server) addAgent(ctx context.Context, a *Agent) error {
 	if err != nil {
 		return err
 	}
+	// A pending site has no key yet — store NULL so several pending sites can
+	// coexist under the UNIQUE index (MariaDB allows many NULLs).
+	var pub any
+	if a.PublicKey != "" {
+		pub = a.PublicKey
+	}
+	var expires any
+	if !a.EnrollExpires.IsZero() {
+		expires = a.EnrollExpires
+	}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO agents (user_id, agent_id, name, public_key, tunnel_ip, totp_secret, enabled, routes_json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.UserID, a.AgentID, a.Name, a.PublicKey, a.TunnelIP, a.TOTPSecret, boolInt(a.Enabled), string(routes))
+		`INSERT INTO agents (user_id, agent_id, name, public_key, tunnel_ip, totp_secret, enabled, routes_json, enroll_code, enroll_expires)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.UserID, a.AgentID, a.Name, pub, a.TunnelIP, a.TOTPSecret, boolInt(a.Enabled), string(routes),
+		a.EnrollCode, expires)
+	return err
+}
+
+// setAgentEnrollCode rotates the one-time install code of a site.
+func (s *Server) setAgentEnrollCode(ctx context.Context, id int64, code string, expires time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE agents SET enroll_code = ?, enroll_expires = ? WHERE id = ?`, code, expires, id)
+	return err
+}
+
+// bindAgentEnrollment attaches a machine's public key to a pending site.
+// v0.4: sites no longer use TOTP at all — the install code is the one-time
+// proof, afterwards the (mutually authenticated) keypair is the credential.
+func (s *Server) bindAgentEnrollment(ctx context.Context, id int64, publicKey string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE agents SET public_key = ?, enrolled_at = NOW(), enroll_code = '', enroll_expires = NULL, totp_secret = '' WHERE id = ?`,
+		publicKey, id)
+	return err
+}
+
+// resetAgentKey detaches the enrolled machine (the next enrollment gets a fresh
+// key; the old machine is refused by the hub).
+func (s *Server) resetAgentKey(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE agents SET public_key = NULL, enrolled_at = NULL WHERE id = ?`, id)
+	return err
+}
+
+func (s *Server) setAgentRoutes(ctx context.Context, id int64, routes []AgentRoute) error {
+	raw, err := json.Marshal(routes)
 	if err != nil {
 		return err
 	}
-	return nil
+	_, err = s.db.ExecContext(ctx, `UPDATE agents SET routes_json = ? WHERE id = ?`, string(raw), id)
+	return err
+}
+
+func (s *Server) setAgentTunnelIP(ctx context.Context, id int64, ip string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET tunnel_ip = ? WHERE id = ?`, ip, id)
+	return err
+}
+
+// ---------------------------------------------------------------- settings
+
+func (s *Server) getSetting(ctx context.Context, key, def string) string {
+	var v string
+	if err := s.db.QueryRowContext(ctx, `SELECT v FROM settings WHERE k = ?`, key).Scan(&v); err != nil {
+		return def
+	}
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func (s *Server) setSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO settings (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)`, key, value)
+	return err
 }
 
 func (s *Server) setAgentEnabled(ctx context.Context, id int64, enabled bool) error {

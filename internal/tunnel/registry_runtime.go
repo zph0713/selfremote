@@ -90,6 +90,7 @@ func (e *Engine) applyAgentRegistryLocked(m map[string]PeerConfig) []agentCmdOut
 		}
 		if p.cfg.TOTPSecret != pc.TOTPSecret {
 			e.logf("agent registry: agent %s 的 MFA 密钥已更新，重新认证", p.cfg.Name)
+			p.cfg.TOTPSecret = pc.TOTPSecret
 			p.authAttempts = 0
 			p.authed = false
 		}

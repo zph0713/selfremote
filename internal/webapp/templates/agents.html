@@ -12,6 +12,17 @@
 <div class="flash err">网段冲突：{{.}}</div>
 {{end}}
 
+<div class="card">
+  <h2>路由模式（站点网段怎么呈现给客户端）</h2>
+  <form method="post" action="/agents/route-mode">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label class="inline"><input type="radio" name="mode" value="auto" {{if eq .Data.RouteMode "auto"}}checked{{end}}> 自动（默认）：网段不冲突就原样用；撞车时给后来者分配虚拟网段并做地址翻译</label><br>
+    <label class="inline"><input type="radio" name="mode" value="real" {{if eq .Data.RouteMode "real"}}checked{{end}}> 真实网段：永远原样呈现；冲突的站点会被拒绝创建</label><br>
+    <label class="inline"><input type="radio" name="mode" value="virtual" {{if eq .Data.RouteMode "virtual"}}checked{{end}}> 总是虚拟：每个站点都映射到 10.201.x，客户端只见虚拟网段</label>
+    <p><button type="submit">切换路由模式</button> <span class="muted small">当前：{{.Data.RouteModeLabel}}（对之后创建/修改的站点生效）</span></p>
+  </form>
+</div>
+
 {{if .Data.Agents}}
 <table>
   <tr>
@@ -30,7 +41,8 @@
       <div class="muted small mono">{{.AgentID}}{{if .Live.Hostname}} · {{.Live.Hostname}}{{end}}{{if .Live.Version}} · v{{.Live.Version}}{{end}}</div>
     </td>
     <td>
-      {{if eq .Live.State "在线"}}<span class="dot ok"></span>{{.Live.State}}
+      {{if .Pending}}<span class="dot warn"></span>等待接入
+      {{else if eq .Live.State "在线"}}<span class="dot ok"></span>{{.Live.State}}
       {{else if eq .Live.State "认证中"}}<span class="dot warn"></span>{{.Live.State}}
       {{else if eq .Live.State "已停用"}}<span class="dot muted"></span>{{.Live.State}}
       {{else}}<span class="dot muted"></span>{{.Live.State}}{{end}}
@@ -41,7 +53,7 @@
     <td>{{human_bytes .Live.RxBytes}} / {{human_bytes .Live.TxBytes}}</td>
     <td>{{since .Live.LastSeen}}</td>
     <td>
-      <a class="btn" href="/agents/{{.AgentID}}">详情</a>
+      <a class="btn" href="/agents/{{.AgentID}}">{{if .Pending}}接入{{else}}详情{{end}}</a>
       <form method="post" action="/agents/{{.AgentID}}/state" class="inline">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         {{if .Enabled}}
@@ -57,7 +69,7 @@
   {{end}}
 </table>
 {{else}}
-<p class="muted">还没有站点。点「添加站点」创建第一个：填好名称和站点内网网段后，下载部署包放到那台机器上运行即可。</p>
+<p class="muted">还没有站点。点「添加站点」创建第一个：填好名称和站点内网网段，然后在目标机器上跑一行安装命令即可。</p>
 {{end}}
 
 <div class="card">
@@ -65,8 +77,7 @@
   <p class="muted small">
     客户端只连接<b>中转服务端</b>，服务端按「站点网段」把流量交给对应站点；站点把包送进自己的内网并做源地址改写。
     因此：客户端配置里只需要<b>站点对内呈现的网段</b>，不用知道站点在哪、有没有公网地址。
-    多个站点网段相同（例如都是 192.168.1.0/24）时，给其中一个填一个虚拟网段（如 <code>192.168.1.0/24 => 10.200.7.0/24</code>），
-    站点侧会自动做地址翻译。
+    两个站点网段相同（例如都是 192.168.1.0/24）时，用上面的路由模式让控制面自动分配虚拟网段（或建站时手写 <code>192.168.1.0/24 => 10.200.7.0/24</code>），站点侧会自动做地址翻译。
   </p>
 </div>
 {{end}}
