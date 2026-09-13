@@ -58,7 +58,11 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
+      # 主端口（局域网/家庭内访问用）
       - "${HTTP_PORT:-8080}:80"
+      # 备用端口：部分家宽会拦截入站的 80/8080/8443 等常见端口，
+      # 外网访问不走主端口时可以用这个（也方便改成任意端口）
+      - "${HTTP_ALT_PORT:-28080}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
