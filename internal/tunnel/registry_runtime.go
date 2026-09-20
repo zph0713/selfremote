@@ -50,7 +50,8 @@ func (e *Engine) applyRegistryLocked(m map[string]PeerConfig) {
 			}
 			if p.cfg.TOTPSecret != pc.TOTPSecret {
 				p.authAttempts = 0
-				p.authed = false
+				p.cfg.TOTPSecret = pc.TOTPSecret
+				p.resetAuth()
 			}
 			p.cfg.Name = pc.Name
 			p.cfg.User = pc.User
@@ -92,7 +93,7 @@ func (e *Engine) applyAgentRegistryLocked(m map[string]PeerConfig) []agentCmdOut
 			e.logf("agent registry: agent %s 的 MFA 密钥已更新，重新认证", p.cfg.Name)
 			p.cfg.TOTPSecret = pc.TOTPSecret
 			p.authAttempts = 0
-			p.authed = false
+			p.resetAuth()
 		}
 		if p.cfg.Enabled != pc.Enabled {
 			p.cfg.Enabled = pc.Enabled

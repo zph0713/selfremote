@@ -42,6 +42,11 @@ type hubSetup struct {
 
 	// Extra static agent (for multi-site tests).
 	extraAgent *hubExtraAgent
+
+	// Timing knobs for the "session dies" tests: a short keepalive plus a
+	// short hub dead-peer timeout make a stopped engine visible in ~1s.
+	keepalive  time.Duration
+	serverDead time.Duration
 }
 
 type hubExtraAgent struct {
@@ -61,6 +66,12 @@ type hubEnv struct {
 	extra    *Engine
 	extraDev *FakeDevice
 
+	// Agent options + its stop handle, so a test can restart the site machine
+	// with the very same key and configuration.
+	agOpts   Options
+	cancelAg context.CancelFunc
+	doneAg   chan struct{}
+
 	srvPub   []byte
 	clPub    []byte
 	agPub    []byte
@@ -79,13 +90,21 @@ func (h *hubEnv) stop() {
 	}
 }
 
-func (h *hubEnv) start(t *testing.T, e *Engine) {
+func (h *hubEnv) start(t *testing.T, e *Engine) (context.CancelFunc, chan struct{}) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	h.cancels = append(h.cancels, cancel)
 	h.dones = append(h.dones, done)
 	go func() { defer close(done); e.Run(ctx) }()
+	return cancel, done
+}
+
+// stopAg stops the site agent: its session dies exactly like a restarted
+// container or a rebooted machine (no goodbye frame).
+func (h *hubEnv) stopAg() {
+	h.cancelAg()
+	<-h.doneAg
 }
 
 func mustRoute(t *testing.T, real, virt string) RouteMap {
@@ -176,6 +195,12 @@ func newHubEnv(t *testing.T, s hubSetup) *hubEnv {
 		TunnelCIDR: "10.77.0.1/24", Peers: srvPeers,
 		SkipNetConfig: true, Logf: t.Logf,
 	}
+	if s.serverDead > 0 {
+		srvOpts.DeadTimeout = s.serverDead
+	}
+	if s.keepalive > 0 {
+		srvOpts.KeepaliveInterval = s.keepalive
+	}
 	if s.agentsFile {
 		srvOpts.AgentsFile = agentsFile
 		writeAgentsFile(t, agentsFile, []RegistryAgent{{
@@ -208,6 +233,10 @@ func newHubEnv(t *testing.T, s hubSetup) *hubEnv {
 	if s.agentMFA {
 		agOpts.MFASecret = testAgentSecret
 	}
+	if s.keepalive > 0 {
+		agOpts.KeepaliveInterval = s.keepalive
+	}
+	h.agOpts = agOpts
 	ag, err := New(agOpts)
 	if err != nil {
 		t.Fatalf("agent New: %v", err)
@@ -229,6 +258,9 @@ func newHubEnv(t *testing.T, s hubSetup) *hubEnv {
 			return code, true
 		}
 	}
+	if s.keepalive > 0 {
+		clOpts.KeepaliveInterval = s.keepalive
+	}
 	cl, err := New(clOpts)
 	if err != nil {
 		t.Fatalf("client New: %v", err)
@@ -236,7 +268,7 @@ func newHubEnv(t *testing.T, s hubSetup) *hubEnv {
 	h.cl = cl
 
 	h.start(t, srv)
-	h.start(t, ag)
+	h.cancelAg, h.doneAg = h.start(t, ag)
 	h.start(t, cl)
 
 	if s.extraAgent != nil {
@@ -554,6 +586,106 @@ func TestHubKickAgentReconnects(t *testing.T) {
 	if h.srv.KickAgent("nope") {
 		t.Error("KickAgent(unknown) must return false")
 	}
+}
+
+// peerByName returns the hub's view of one peer.
+func peerByName(t *testing.T, srv *Engine, name string) PeerStats {
+	t.Helper()
+	for _, p := range srv.Stats() {
+		if p.Name == name {
+			return p
+		}
+	}
+	t.Fatalf("peer %q not found in %+v", name, srv.Stats())
+	return PeerStats{}
+}
+
+// waitPeerConnected waits for a peer's live-session flag to reach want.
+func waitPeerConnected(t *testing.T, srv *Engine, name string, want bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, p := range srv.Stats() {
+			if p.Name == name && p.Connected == want {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("peer %q: connected never became %v within %v (%+v)", name, want, timeout, srv.Stats())
+}
+
+// TestSiteStaysUsableAcrossAgentRestart guards the hub-side auth state: a site
+// that needs no TOTP code must never be left gated after its session dies —
+// otherwise the panel shows 「认证中」 and the relay refuses the site's traffic
+// for good, and "delete the site and install it again" looks like the only fix
+// (a fresh key re-registers the peer, which is what restores the flag).
+func TestSiteStaysUsableAcrossAgentRestart(t *testing.T) {
+	h := newHubEnv(t, hubSetup{
+		allow:      []string{"home"}, // no MFA: the v0.4 site default
+		keepalive:  300 * time.Millisecond,
+		serverDead: 1500 * time.Millisecond,
+	})
+	waitUp(t, h.cl, 5*time.Second, "client")
+	waitUp(t, h.ag, 5*time.Second, "agent")
+	waitPeersAuthed(t, h.srv, 2, 5*time.Second)
+	waitFlow(t, h, true, 3*time.Second, "10.200.7.50")
+
+	// The site machine restarts: the session dies with no goodbye frame and
+	// the hub reaps it after its dead-peer timeout.
+	h.stopAg()
+	waitPeerConnected(t, h.srv, "home", false, 5*time.Second)
+	if p := peerByName(t, h.srv, "home"); !p.Authed {
+		t.Fatalf("site left gated after its session died (panel would show 认证中): %+v", p)
+	}
+
+	// Same key, same config: it must be usable again without a reinstall.
+	agOpts := h.agOpts
+	agDev := NewFakeDevice("ag1")
+	agOpts.Device = agDev
+	ag2, err := New(agOpts)
+	if err != nil {
+		t.Fatalf("restart agent: %v", err)
+	}
+	h.agDev = agDev
+	h.start(t, ag2)
+	waitUp(t, ag2, 5*time.Second, "agent after restart")
+	waitPeersAuthed(t, h.srv, 2, 6*time.Second)
+	waitFlow(t, h, true, 4*time.Second, "10.200.7.50")
+}
+
+// TestMfaSiteGatedAgainAfterRestart is the counterpart: a site that really
+// uses a code must prove itself again once its session is gone.
+func TestMfaSiteGatedAgainAfterRestart(t *testing.T) {
+	h := newHubEnv(t, hubSetup{
+		allow: []string{"home"}, agentMFA: true,
+		keepalive:  300 * time.Millisecond,
+		serverDead: 1500 * time.Millisecond,
+	})
+	waitUp(t, h.cl, 5*time.Second, "client")
+	waitUp(t, h.ag, 5*time.Second, "agent")
+	waitPeersAuthed(t, h.srv, 2, 5*time.Second)
+	waitFlow(t, h, true, 3*time.Second, "10.200.7.50")
+
+	h.stopAg()
+	waitPeerConnected(t, h.srv, "home", false, 5*time.Second)
+	if p := peerByName(t, h.srv, "home"); p.Authed {
+		t.Fatalf("an MFA site must not count as authenticated without a fresh code: %+v", p)
+	}
+
+	// The agent answers the challenge from its own secret, unattended.
+	agOpts := h.agOpts
+	agDev := NewFakeDevice("ag1")
+	agOpts.Device = agDev
+	ag2, err := New(agOpts)
+	if err != nil {
+		t.Fatalf("restart agent: %v", err)
+	}
+	h.agDev = agDev
+	h.start(t, ag2)
+	waitUp(t, ag2, 5*time.Second, "agent after restart")
+	waitPeersAuthed(t, h.srv, 2, 6*time.Second)
+	waitFlow(t, h, true, 4*time.Second, "10.200.7.50")
 }
 
 func TestHubMultipleSitesDisambiguated(t *testing.T) {

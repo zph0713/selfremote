@@ -190,7 +190,7 @@ func (e *Engine) KickAgent(id string) bool {
 		e.sendAgentCmd(target, "kick", "管理员要求重连")
 		e.mu.Lock()
 		target.cur, target.prev = nil, nil
-		target.authed = false
+		target.resetAuth()
 		e.mu.Unlock()
 	}
 	return true

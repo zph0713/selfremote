@@ -119,6 +119,14 @@ type peerState struct {
 
 func (p *peerState) requiresMFA() bool { return p.cfg.TOTPSecret != "" }
 
+// resetAuth re-arms the auth gate after a peer loses its session (or its
+// registry entry changes). A peer that needs a code must prove itself again;
+// a peer that does not is authenticated by its key handshake alone. Leaving
+// the flag stuck at false is what makes a site show 「认证中」 forever with the
+// relay refusing its traffic, even though the agent reconnects normally.
+// Callers must hold e.mu.
+func (p *peerState) resetAuth() { p.authed = !p.requiresMFA() }
+
 // Status is a snapshot of an Engine's state (used by tests and reporting).
 type Status struct {
 	Up          bool
@@ -520,6 +528,14 @@ func (e *Engine) tick() {
 
 	e.mu.Lock()
 	for _, p := range e.peers {
+		// A peer that needs no code is authenticated by its handshake alone:
+		// keep that coherent whenever a session is live, so that no path
+		// (dead peer, bye, kick, registry change) can leave a site stuck at
+		// 「认证中」 with its traffic refused.
+		if e.opts.Mode.responder() && p.cur != nil && !p.authed && !p.requiresMFA() {
+			p.authed = true
+		}
+
 		// Expire superseded sessions.
 		if p.prev != nil && now.After(p.prevDeadline) {
 			p.prev = nil
@@ -529,7 +545,7 @@ func (e *Engine) tick() {
 		if p.cur != nil && now.Sub(p.lastRecv) > e.opts.DeadTimeout {
 			e.logf("peer %s: no traffic for %v, dropping session", p.cfg.Name, now.Sub(p.lastRecv).Round(time.Second))
 			p.cur, p.prev = nil, nil
-			p.authed = false
+			p.resetAuth()
 			p.authSentAt = time.Time{}
 			p.nextAttempt = now
 			if e.opts.Mode.dials() {
@@ -847,7 +863,7 @@ func (e *Engine) handleData(addr *net.UDPAddr, frame []byte, nonce uint64) {
 			e.logf("peer %s: disconnected (bye)", p.cfg.Name)
 			e.mu.Lock()
 			p.cur, p.prev = nil, nil
-			p.authed = false
+			p.resetAuth()
 			e.mu.Unlock()
 		}
 	case frameAuthResp:
