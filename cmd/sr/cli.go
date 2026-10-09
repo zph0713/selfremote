@@ -41,29 +41,31 @@ func readLine() (string, error) {
 	return strings.TrimSpace(line), err
 }
 
-// unlockKeyfile decrypts an encrypted key file. When pass comes from a flag or
-// the environment (automation) a wrong passphrase fails immediately; when it
-// was not supplied, the user gets up to 3 interactive attempts.
-func unlockKeyfile(raw []byte, pass string) ([]byte, error) {
+// unlockKeyfile decrypts an encrypted key file and also returns the
+// passphrase that opened it (callers that write the file back — `sr keyedit`
+// — must re-seal with the same one). When pass comes from a flag or the
+// environment (automation) a wrong passphrase fails immediately; when it was
+// not supplied, the user gets up to 3 interactive attempts.
+func unlockKeyfile(raw []byte, pass string) (plain []byte, usedPass string, err error) {
 	interactive := pass == ""
 	for i := 1; ; i++ {
 		if pass == "" {
 			fmt.Fprint(os.Stderr, "该密钥文件已加密，请输入文件密码（回车取消）: ")
 			p, err := readSecret()
 			if err != nil || p == "" {
-				return nil, errors.New("未输入密钥文件密码")
+				return nil, "", errors.New("未输入密钥文件密码")
 			}
 			pass = p
 		}
 		plain, err := keyfile.Open(raw, pass)
 		if err == nil {
-			return plain, nil
+			return plain, pass, nil
 		}
 		if !errors.Is(err, keyfile.ErrWrongPassphrase) || !interactive {
-			return nil, err
+			return nil, "", err
 		}
 		if i >= 3 {
-			return nil, errors.New("密钥文件密码错误次数过多")
+			return nil, "", errors.New("密钥文件密码错误次数过多")
 		}
 		fmt.Fprintf(os.Stderr, "密码错误，请重试（%d/3）\n", i)
 		pass = ""
@@ -77,6 +79,7 @@ type clientState struct {
 	ready   bool
 	info    *tunnel.ServerInfo
 	mfaUsed bool
+	srvNote string // display suffix for the server line, e.g. "（-server 覆盖）"
 }
 
 func (cs *clientState) setMFAUsed() {
@@ -89,7 +92,7 @@ func (cs *clientState) onReady(cfg *config.Client) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.ready = true
-	printReadyBlock(cfg, cs.info, cs.mfaUsed)
+	printReadyBlock(cfg, cs.info, cs.mfaUsed, cs.srvNote)
 }
 
 func (cs *clientState) onInfo(i tunnel.ServerInfo) {
@@ -107,10 +110,10 @@ func (cs *clientState) isReady() bool {
 	return cs.ready
 }
 
-func printReadyBlock(cfg *config.Client, info *tunnel.ServerInfo, mfaUsed bool) {
+func printReadyBlock(cfg *config.Client, info *tunnel.ServerInfo, mfaUsed bool, srvNote string) {
 	fmt.Println()
 	fmt.Println("═══════════════ selfremote 已连接 ═══════════════")
-	fmt.Printf("  服务端:  %s\n", cfg.Server)
+	fmt.Printf("  服务端:  %s%s\n", cfg.Server, srvNote)
 	if info != nil {
 		printHostInfo(*info)
 	}

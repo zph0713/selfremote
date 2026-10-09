@@ -5,9 +5,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // Key is a 32-byte X25519 key.
@@ -169,6 +173,75 @@ func (c *Client) validate(name string) error {
 		return fmt.Errorf("%s: server_public_key: %w", name, err)
 	}
 	return nil
+}
+
+// NormalizeServerAddr trims and checks a "host:port" server endpoint as used
+// by the client config `server` field (and the `-server` override / `sr
+// keyedit`). It catches the common mistakes early — missing port,
+// non-numeric port, an IPv6 address without the required brackets — with a
+// message aimed at the CLI user instead of a far-away dial failure.
+func NormalizeServerAddr(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", errors.New("服务端地址不能为空")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		if strings.Count(addr, ":") > 1 {
+			return "", fmt.Errorf("地址 %q 格式不对：IPv6 必须用方括号包起来并带端口，如 [240e:1:2::3]:28333", addr)
+		}
+		return "", fmt.Errorf("地址 %q 格式不对：应为「主机:端口」，如 nas.example.com:28333 或 [240e:1:2::3]:28333", addr)
+	}
+	if host == "" {
+		return "", fmt.Errorf("地址 %q 缺少主机名", addr)
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
+		return "", fmt.Errorf("地址 %q 的端口必须是数字（1-65535）", addr)
+	}
+	return addr, nil
+}
+
+// SetClientServer rewrites the "server" field of a plaintext client/agent
+// config, preserving every other field as-is. Used by `sr keyedit` so a key
+// file can be repointed at a new server address without regenerating it in
+// the web control plane.
+func SetClientServer(plain []byte, addr string) ([]byte, error) {
+	addr, err := NormalizeServerAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &fields); err != nil {
+		return nil, fmt.Errorf("解析配置: %w", err)
+	}
+	if _, ok := fields["server"]; !ok {
+		return nil, errors.New("配置里没有 server 字段，这不是客户端密钥文件")
+	}
+	quoted, err := json.Marshal(addr)
+	if err != nil {
+		return nil, err
+	}
+	fields["server"] = quoted
+	return json.MarshalIndent(fields, "", "  ")
+}
+
+// ClientInfo reads the display fields of a plaintext client config (server
+// address, tunnel address and routes) without validating its keys — what
+// `sr keyedit -show` prints.
+func ClientInfo(plain []byte) (server, tunnelCIDR string, routes []string, err error) {
+	var v struct {
+		Server     string   `json:"server"`
+		TunnelCIDR string   `json:"tunnel_cidr"`
+		Routes     []string `json:"routes"`
+	}
+	if err := json.Unmarshal(plain, &v); err != nil {
+		return "", "", nil, fmt.Errorf("解析配置: %w", err)
+	}
+	if v.Server == "" {
+		return "", "", nil, errors.New("配置里没有 server 字段，这不是客户端密钥文件")
+	}
+	return v.Server, v.TunnelCIDR, v.Routes, nil
 }
 
 // LoadServer reads, validates and parses a hub config file.

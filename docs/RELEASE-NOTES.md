@@ -1,64 +1,49 @@
-# v0.4.1 — 热修：站点不再卡在「认证中」（会话重建后自动恢复）
+# v0.4.2 — 客户端目标地址可修改：服务端地址变了，不用重新生成密钥文件
 
-一个**线上症状明确、修复很小**的热修版：站点 agent 重启（或掉线、被踢线、机器休眠）之后，
-面板一直显示「认证中」，而且这个站点**实际用不了**——客户端到该站点的流量被中转端拒绝。
-过去只能靠「删掉站点重装」（重新接入 = 换公钥 = 注册表里新增一条记录）绕过。
+## 场景
 
-## 修的是什么
+中转服务端的公网地址一变（换运营商、动态 IPv6 前缀刷新等），客户端密钥文件（`.srkey`）里
+记的还是旧地址，连接一直失败；过去只能去 Web 控制面重新生成、重新下载一份密钥文件——
+而控制面往往正因为同一个地址问题连不上。
 
-中转服务端（`sr server`）对每个站点维护一个「已认证」标记。v0.4 起站点不再使用动态码，
-这个标记本来只应在**注册表新增该站点的那一刻**置位——于是任何一次会话终止
-（agent 重启后的静默超时、BYE、管理员踢线、注册表里 MFA 字段变化）都会把它清成 false，
-而**再也没有任何路径会把它恢复**：
+v0.4.2 起，「去哪找服务端」随时可查、可改，全程只在客户端本机完成：
 
-- 面板状态机：`已连接 + 未认证` → 显示「认证中」
-- 中转判活：客户端 → 该站点的数据一律按「站点不可用」丢弃（计数器记 `dropped_offline`）
+## 怎么用
 
-结果是 agent 侧日志一切正常（`session established`、两分钟一次 rekey 都在），
-面板却永远「认证中」、站点用不了。重新接入之所以"能治好"，只是因为换公钥等于新增一条注册表记录。
+```sh
+# 查看密钥文件里当前记的服务端地址
+./selfremote-macos-arm64 keyedit -c client-xxx.srkey -show
 
-修复（`internal/tunnel`）：
+# 改成新地址：先验证格式 → 再写回文件 → 原文件自动备份为 client-xxx.srkey.bak
+./selfremote-macos-arm64 keyedit -c client-xxx.srkey -server '[240e:1:2::3]:28333'
 
-- 新增 `peerState.resetAuth()`：会话丢失后按「该站点是否需要动态码」重新置位——
-  **需要动态码的站点仍然必须重新验证**（安全语义不变），不需要的站点由密钥握手本身完成认证
-- 会话终止的四条路径（静默掉线 / BYE / 踢线 / 注册表密钥变化）统一走 `resetAuth()`
-- tick 循环加一条兜底：只要会话在线且该站点不需要动态码，就当已认证（防止将来再漏掉某条路径）
-
-## 影响与恢复
-
-- **不需要重新接入、不需要重新生成安装码**。升级中转服务端后，仍在线的站点会在 1 秒内
-  自动从「认证中」变回「在线」，被拒绝的流量立即恢复
-- 真正使用动态码的站点（v0.3 时代配置）行为不变：会话重建后依旧要重新通过一次动态码
-- 新增两条回归测试：无动态码站点重启后必须可用；有动态码站点重启后必须重新验证
-
-## 升级（只换中转服务端即可）
-
-```bash
-cd <项目目录>
-sudo docker compose pull && sudo docker compose up -d server
+# 不带 -server 为交互式输入；-kpass / 环境变量 SR_KEYPASS 供自动化使用（如启动脚本）
 ```
 
-离线环境：用 Release 里的 `selfremote-image-linux-amd64.tar.gz`
-（注意包里的镜像名是 `selfremote:release`，导入后要重新打成 compose 认的名字）：
+只想临时用新地址、不动文件：`sr client` 支持一次性的 `-server` 覆盖
+（`sr socks` 同样支持）：
 
-```bash
-sudo gunzip -c selfremote-image-linux-amd64.tar.gz | sudo docker load
-sudo docker tag selfremote:release ghcr.io/zph0713/selfremote:v0.4.1
-sudo docker tag selfremote:release ghcr.io/zph0713/selfremote:latest
-sudo docker compose up -d server
+```sh
+sudo ./selfremote-macos-arm64 client -c client-xxx.srkey -server '[240e:1:2::3]:28333'
 ```
 
-## 兼容性
+## 说明
 
-- 协议、注册表格式、客户端 `.srkey`、站点配置**全部不变**，可以只升级中转服务端
-- 站点与客户端二进制无需更换（本修复只在中转服务端一侧生效）
+- 地址只决定「去哪找服务端」。服务端身份仍由密钥文件里的 `server_public_key` 在握手时
+  验证（改地址本就连不上真正的服务端）——不降低安全性，也不影响站点权限（权限在服务端侧）
+- `keyedit` 全程本地操作、不联网；加密文件用同一个文件密码重新封装（换新随机盐），
+  其余字段原样保留
+- IPv6 必须带方括号（如 `[240e:1:2::3]:28333`），格式不对会被提前拦下并给出中文提示
+- 明文 `client.json` 同样适用（不加密封回，直接改）
 
-## v0.4.0 亮点（摘要）
+## 升级（只需换客户端二进制）
 
-- 站点接入 = 一行命令：网页建站拿一次性安装码 → 目标机器 `curl … /install.sh | sudo bash -s -- --code XXXX-XXXX`
-- 初次部署自带本机站点（`init.sh` 预置 + 控制面自动导入），起完 compose 就能用
-- 路由模式开关（auto/real/virtual）：站点网段冲突时自动分配虚拟网段并做地址翻译
-- `sr socks`：免 root 的本地 SOCKS5/HTTP 代理，走隧道但不建 TUN、不改系统路由
-- 安全加固：安装码一次性 + 限速、站点密钥现场生成、控制面会话语义收紧
+- 中转服务端、站点、Web 控制面**不需要升级**：协议与密钥文件格式均未变化
+- 已有密钥文件直接可用，不需要重新生成；`-server` 覆盖与 `keyedit` 都是新增能力
+
+## v0.4.1 亮点（摘要）
+
+- 热修：站点 agent 重启 / 掉线 / 被踢线后不再卡「认证中」，站点会话自动恢复；
+  只需升级中转服务端（`docker compose pull && docker compose up -d server`）
 
 更早的版本说明见 [Releases](https://github.com/zph0713/selfremote/releases)。

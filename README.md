@@ -37,6 +37,9 @@ docker compose up -d    # nginx + web + mariadb + server
 2. 在 Web 控制面「客户端密钥」里勾选可访问站点并生成 `client-*.srkey`
 3. `sudo ./selfremote-macos-arm64 client -c client-yourname.srkey` → 输入文件密码 → 动态码
 
+> 服务端公网地址变了（动态 IPv6 换前缀等）？不用重新生成密钥文件：
+> `sr keyedit -c client-xxx.srkey -server <新地址>` 改文件里的地址，或 `client -server <新地址>` 临时覆盖。
+
 详见 [docs/QUICKSTART-CLIENT.md](docs/QUICKSTART-CLIENT.md)
 
 ### 🌐 站点（Agent，任意能访问目标内网的机器）
@@ -80,7 +83,7 @@ bash scripts/e2e-control.sh
 ## 仓库结构
 
 ```
-cmd/sr/            CLI（server / agent / gateway / client / genkey）
+cmd/sr/            CLI（server / agent / gateway / client / socks / keyedit / genkey）
 cmd/web/           Web 控制面入口
 internal/tunnel/   协议核心：握手、会话、帧、MFA、注册表、TUN、用户态中转、地址翻译
 internal/serverapp/ 中转服务端管控 API（状态 / 踢线 / 刷新）

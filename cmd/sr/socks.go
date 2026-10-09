@@ -7,7 +7,7 @@
 //
 // 用法：
 //
-//	sr socks -c client.srkey -l 127.0.0.1:1080 [-dns 192.168.2.1]
+//	sr socks -c client.srkey -l 127.0.0.1:1080 [-dns 192.168.2.1] [-server host:port]
 //
 //	curl --socks5-hostname 127.0.0.1:1080 http://192.168.2.5:5000/
 //	ssh -o ProxyCommand='nc -X 5 -x 127.0.0.1:1080 %h %p' user@192.168.2.5
@@ -436,7 +436,7 @@ func cmdSocks(args []string) error {
 	mfaCode := fs.String("mfa", "", "首次动态码（或环境变量 SR_MFA）；不填则交互式询问")
 	listen := fs.String("l", "127.0.0.1:1080", "本地监听地址（SOCKS5 + HTTP CONNECT）")
 	dnsSrv := fs.String("dns", "", "走隧道解析域名用的 DNS（站点内地址，如 192.168.2.1）；不填则只能访问 IP")
-	serverOverride := fs.String("server", "", "覆盖配置里的服务端地址（调试用，如 127.0.0.1:28333）")
+	serverOverride := fs.String("server", "", "覆盖密钥文件里的服务端地址（服务端地址变化时用，如 '[240e:1:2::3]:28333'）")
 	mtu := fs.Int("mtu", 1360, "隧道 MTU")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -454,7 +454,7 @@ func cmdSocks(args []string) error {
 		if pass == "" {
 			pass = os.Getenv("SR_KEYPASS")
 		}
-		plain, err := unlockKeyfile(raw, pass)
+		plain, _, err := unlockKeyfile(raw, pass)
 		if err != nil {
 			return err
 		}
@@ -466,8 +466,14 @@ func cmdSocks(args []string) error {
 	if err != nil {
 		return err
 	}
+	srvNote := ""
 	if *serverOverride != "" {
-		cfg.Server = *serverOverride
+		addr, err := config.NormalizeServerAddr(*serverOverride)
+		if err != nil {
+			return err
+		}
+		cfg.Server = addr
+		srvNote = "（-server 覆盖）"
 	}
 	var dnsSrvAddr netip.Addr
 	if *dnsSrv != "" {
@@ -554,7 +560,7 @@ func cmdSocks(args []string) error {
 	defer stop()
 
 	fmt.Printf("selfremote socks %s\n", version)
-	fmt.Printf("  server:   %s\n", cfg.Server)
+	fmt.Printf("  server:   %s%s\n", cfg.Server, srvNote)
 	fmt.Printf("  tunnel:   %s (userspace stack, no root)\n", cfg.TunnelCIDR)
 	fmt.Printf("  routes:   %v\n", cfg.Routes)
 	fmt.Printf("  listen:   %s (SOCKS5 + HTTP CONNECT)\n", *listen)

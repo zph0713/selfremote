@@ -11,6 +11,8 @@ keys/
 *.local.json
 *.key
 *.pem
+*.srkey
+*.srkey.bak
 # 真实实例配置（示例见 docs/PROTOCOL.md）
 gateway.json
 client.json

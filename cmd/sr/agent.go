@@ -54,7 +54,7 @@ func cmdAgent(args []string) error {
 		if pass == "" {
 			pass = os.Getenv("SR_KEYPASS")
 		}
-		plain, err := unlockKeyfile(raw, pass)
+		plain, _, err := unlockKeyfile(raw, pass)
 		if err != nil {
 			return err
 		}

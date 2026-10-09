@@ -9,6 +9,7 @@
 //	sr gateway -c <file>   run as home gateway (on the NAS)
 //	sr client  -c <file>   run as client (on the Mac; <file> may be an
 //	                       encrypted key file downloaded from the web UI)
+//	sr keyedit -c <file>   show or change the server address inside a key file
 package main
 
 import (
@@ -28,7 +29,7 @@ import (
 	"selfremote/internal/tunnel"
 )
 
-const version = "0.4.1"
+const version = "0.4.2"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -50,6 +51,8 @@ func main() {
 		err = cmdGateway(args)
 	case "client":
 		err = cmdClient(args)
+	case "keyedit":
+		err = cmdKeyedit(args)
 	case "socks":
 		err = cmdSocks(args)
 	case "version", "-v", "--version":
@@ -79,7 +82,12 @@ usage:
   sr gateway -c <file>      run a standalone gateway (direct clients, no hub)
   sr client  -c <file>      run as client (on the Mac)
                             <file> may be an encrypted key file (.srkey)
-                            downloaded from the web UI
+                            downloaded from the web UI; -server <host:port>
+                            overrides the address inside it for this run
+  sr keyedit -c <file>      show (-show) or change (-server <host:port>) the
+                            server address inside a client key file — use it
+                            when the server's address changed (no need to
+                            regenerate the file in the web UI)
   sr socks   -c <file>      local SOCKS5/HTTP proxy over the tunnel (no root,
                             no tun, no route changes); TCP only for now
   sr genkey                 generate an X25519 key pair (base64)
@@ -159,6 +167,7 @@ func cmdClient(args []string) error {
 	cfgPath := fs.String("c", "", "path to client config file (json, or an encrypted key file)")
 	kpass := fs.String("kpass", "", "key-file passphrase (automation; prefer the interactive prompt)")
 	mfaCode := fs.String("mfa", "", "MFA code for the first attempt (automation; prefer the interactive prompt)")
+	srvOverride := fs.String("server", "", "覆盖密钥文件里的服务端地址（服务端地址变化时用，如 '[240e:1:2::3]:28333'）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -177,7 +186,7 @@ func cmdClient(args []string) error {
 		if pass == "" {
 			pass = os.Getenv("SR_KEYPASS")
 		}
-		plain, err := unlockKeyfile(raw, pass)
+		plain, _, err := unlockKeyfile(raw, pass)
 		if err != nil {
 			return err
 		}
@@ -189,6 +198,15 @@ func cmdClient(args []string) error {
 	if err != nil {
 		return err
 	}
+	srvNote := ""
+	if *srvOverride != "" {
+		addr, err := config.NormalizeServerAddr(*srvOverride)
+		if err != nil {
+			return err
+		}
+		cfg.Server = addr
+		srvNote = "（-server 覆盖）"
+	}
 
 	// MFA prompt. A code passed via -mfa / SR_MFA is used for the first
 	// attempt only; interactive retries always go through the prompt.
@@ -197,7 +215,7 @@ func cmdClient(args []string) error {
 		mfaFirst = os.Getenv("SR_MFA")
 	}
 	var mfaTaken bool
-	cs := &clientState{}
+	cs := &clientState{srvNote: srvNote}
 	authPrompt := func(attempt int) (string, bool) {
 		if mfaFirst != "" && !mfaTaken {
 			mfaTaken = true
@@ -232,7 +250,7 @@ func cmdClient(args []string) error {
 	defer stop()
 
 	fmt.Printf("selfremote client %s\n", version)
-	fmt.Printf("  server: %s\n", cfg.Server)
+	fmt.Printf("  server: %s%s\n", cfg.Server, srvNote)
 	fmt.Printf("  tunnel: %s\n", cfg.TunnelCIDR)
 	fmt.Printf("  routes: %v\n", cfg.Routes)
 
