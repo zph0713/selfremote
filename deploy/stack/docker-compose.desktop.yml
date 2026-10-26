@@ -13,7 +13,9 @@ services:
     network_mode: bridge
     ports:
       - "${TUNNEL_PORT:-28333}:${TUNNEL_PORT:-28333}/udp"
-      - "${API_PORT:-8770}:8770"
+      # 宿主端口与容器端口都用 API_PORT：server.json 里的 api_listen 就是 $API_PORT，
+      # 写死 :8770 会让「API_PORT 换成别的值」时发布端口指向空端口。
+      - "${API_PORT:-8770}:${API_PORT:-8770}"
 
   # 控制面走宿主发布端口访问管控 API（桥接网络里没有服务名 DNS，server 不在同一网络）
   web:

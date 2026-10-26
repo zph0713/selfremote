@@ -28,3 +28,6 @@ Thumbs.db
 .env
 deploy/stack/.env
 deploy/stack/data/
+# 开发栈（docs/DEPLOY-DEV.md）：环境文件与数据目录同样不入库
+deploy/stack/.env.dev
+deploy/stack/data-dev/

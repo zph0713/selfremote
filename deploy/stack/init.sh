@@ -6,6 +6,8 @@
 #   SR_IMAGE        镜像名（默认 ghcr.io/zph0713/selfremote:latest）
 #   TUNNEL_PORT     中转服务端 UDP 端口（默认 28333）
 #   API_PORT        控制 API 端口（默认 8770，只给控制面容器用）
+#   API_BIND        控制 API 绑定地址（默认 127.0.0.1；仅当 server 在桥接网络里、
+#                   需要跨容器访问时改成 0.0.0.0——生产保持 127.0.0.1）
 #   LAN_CIDRS       本机站点要开放的网段（逗号分隔，默认 192.168.1.0/24）
 #   HOME_SITE_ID    本机站点的 agent id（默认 home）
 #   HOME_SITE_NAME  本机站点显示名（默认「本机站点」）
@@ -15,6 +17,7 @@ set -e
 DIR="${1:-./data}"
 PORT="${TUNNEL_PORT:-28333}"
 APIPORT="${API_PORT:-8770}"
+APIBIND="${API_BIND:-127.0.0.1}"
 IMG="${SR_IMAGE:-ghcr.io/zph0713/selfremote:latest}"
 LAN="${LAN_CIDRS:-192.168.1.0/24}"
 SITE_ID="${HOME_SITE_ID:-home}"
@@ -44,7 +47,7 @@ else
   "tunnel_cidr": "10.77.0.1/24",
   "clients_file": "/etc/selfremote/clients.json",
   "agents_file": "/etc/selfremote/agents.json",
-  "api_listen": "127.0.0.1:$APIPORT",
+  "api_listen": "$APIBIND:$APIPORT",
   "api_token": "$TOKEN",
   "status_file": "/etc/selfremote/server-status.json",
   "netinfo_file": "/etc/selfremote/netinfo.json"

@@ -1,0 +1,30 @@
+# 开发/预发栈覆盖（只给「另一台机器上验证新代码」用，绝不用于生产）
+#
+# 与 docker-compose.yml（+ docker-compose.desktop.yml）叠加使用：
+#
+#   docker compose -p selfremote-dev --env-file deploy/stack/.env.dev \
+#     -f deploy/stack/docker-compose.yml \
+#     -f deploy/stack/docker-compose.desktop.yml \
+#     -f deploy/stack/docker-compose.dev.yml up -d
+#
+# 三重隔离：
+#   1. 项目名 -p selfremote-dev（覆盖文件里的 name: selfremote，卷/容器/网络都另起一套）
+#   2. 端口走 .env.dev（HTTP 18080 / ALT 18081 / 隧道 28334 / 管控 API 8771）
+#   3. 数据目录 SR_CONFIG_DIR=./data-dev（密钥、注册表、数据库卷都是新的）
+#
+# 镜像默认指向本地构建的 dev 标签，避免误拉生产在用的 ghcr :latest。
+services:
+  web:
+    image: ${SR_WEB_IMAGE:-selfremote-web:dev}
+    environment:
+      # 桥接网络里没有 server 的服务名 DNS，管控 API 走宿主发布端口
+      SRV_API_URL: ${SRV_API_URL:-http://host.docker.internal:8771}
+
+  server:
+    image: ${SR_IMAGE:-selfremote:dev}
+
+  agent-home:
+    image: ${SR_IMAGE:-selfremote:dev}
+    # Linux 上 host.docker.internal 需要显式映射到宿主网关（Docker Desktop 自带）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
