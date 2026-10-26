@@ -3,6 +3,9 @@
 目标：把分支上的新功能（当前是 M5.0 可观测）在**另一台机器**的 Docker 里跑起来看效果，
 同时保证**正在运行的 server 端一个字节都不变**。
 
+> 交给另一台机器上的 AI 执行：直接给它 [AGENT-DEPLOY.md](AGENT-DEPLOY.md)（含硬约束、一键脚本、验收与汇报格式）。
+> 一条命令搞定：`bash scripts/deploy-dev.sh --check` 预检 → `bash scripts/deploy-dev.sh --yes` 部署。
+
 ## 1. 隔离原则（两套栈没有任何共享）
 
 | 项目 | 生产栈 | 开发栈（本文） |
