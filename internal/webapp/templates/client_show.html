@@ -1,0 +1,55 @@
+{{define "content"}}
+<h1>客户端 {{.Data.Device.Name}}</h1>
+<p class="muted small mono">
+  {{.Data.Device.Username}} · 隧道地址 {{if .Data.Device.TunnelIP}}{{.Data.Device.TunnelIP}}{{else}}—{{end}}
+  · 公钥指纹 {{if .Data.Fingerprint}}{{.Data.Fingerprint}}{{else}}—{{end}}
+</p>
+
+{{if not .Data.HubReachable}}
+<div class="flash err">控制面读不到中转服务端：下面的状态与端口流量可能为空。</div>
+{{end}}
+
+<div class="grid">
+  <div class="card">
+    <h2>实时状态</h2>
+    <table class="kv">
+      <tr><td>状态</td><td>
+        {{if eq .Data.Live.State "在线"}}<span class="dot ok"></span>{{.Data.Live.State}}
+        {{else if eq .Data.Live.State "认证中"}}<span class="dot warn"></span>{{.Data.Live.State}}
+        {{else if eq .Data.Live.State "已停用"}}<span class="dot muted"></span>{{.Data.Live.State}}
+        {{else}}<span class="dot muted"></span>{{.Data.Live.State}}{{end}}
+      </td></tr>
+      <tr><td>当前速率 ↓ / ↑</td><td>{{human_bytes .Data.Live.RxBps}}/s / {{human_bytes .Data.Live.TxBps}}/s</td></tr>
+      <tr><td>累计流量 ↓ / ↑</td><td>{{human_bytes .Data.Live.RxBytes}} / {{human_bytes .Data.Live.TxBytes}}</td></tr>
+      <tr><td>来源地址</td><td class="mono">{{if .Data.Live.Remote}}{{.Data.Live.Remote}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
+      <tr><td>最近活跃</td><td>{{since .Data.Live.LastSeen}}</td></tr>
+      <tr><td>注册时间</td><td>{{since (ts .Data.Device.CreatedAt)}}</td></tr>
+      <tr><td>密钥文件</td><td class="muted small">密钥文件密码与轮换在「客户端密钥」页管理</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>可访问站点</h2>
+    <table class="kv">
+      {{range .Data.Device.Sites}}
+      <tr><td class="mono">{{.}}</td><td class="muted small">已授权</td></tr>
+      {{else}}
+      <tr><td class="muted">未授权任何站点（该设备连上也访问不到内网）</td></tr>
+      {{end}}
+    </table>
+    <p class="muted small">
+      授权列表由控制面下发到注册表、服务端立即按 ACL 生效；但客户端密钥里的路由是<b>生成时</b>写死的，
+      新授权的站点需要重新下载密钥文件才能被客户端系统路由。
+    </p>
+    <p><a class="btn" href="/devices">去「客户端密钥」页调整站点授权</a></p>
+  </div>
+</div>
+
+{{if .Data.PortsErr}}<div class="flash err">端口流量读取失败：{{.Data.PortsErr}}</div>{{end}}
+{{template "ports" .Data}}
+
+<p class="muted small">
+  说明：客户端的端口流量是它<b>经隧道访问</b>的站点端口，不是本机监听端口。
+  端口级数据只在服务端内存中保留最近两分钟内有流量的条目。
+</p>
+{{end}}

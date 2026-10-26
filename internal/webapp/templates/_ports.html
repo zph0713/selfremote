@@ -1,0 +1,101 @@
+{{define "ports"}}
+<div class="card" id="ports-card" data-peer="{{.PortPeer}}">
+  <h2>活跃端口与流量</h2>
+  <p class="muted small">
+    按「协议 + 站点地址 + 端口」聚合，数据来自中转服务端内存里的流表（不落库，服务端重启后归零）。
+    端口显示 <code>—</code> 表示 ICMP 或不带传输层头的分片。
+    <span id="ports-age" class="muted"></span>
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>协议</th>
+        <th>站点地址</th>
+        <th>端口</th>
+        <th>{{.PortLabel}}</th>
+        <th>当前速率 ↓ / ↑</th>
+        <th>累计 ↓ / ↑</th>
+        <th>最近</th>
+      </tr>
+    </thead>
+    <tbody id="ports-body">
+      {{range .Ports}}
+      <tr>
+        <td>{{.ProtoName}}</td>
+        <td class="mono">{{.SiteIP}}</td>
+        <td class="mono">{{if .Port}}{{.Port}}{{else}}—{{end}}</td>
+        <td>{{if .Clients}}{{.Clients}}{{else}}—{{end}}</td>
+        <td>{{human_bytes .BpsToSite}}/s / {{human_bytes .BpsFromSite}}/s</td>
+        <td>{{human_bytes .BytesToSite}} / {{human_bytes .BytesFromSite}}</td>
+        <td>{{since .LastSeen}}</td>
+      </tr>
+      {{else}}
+      <tr><td colspan="7" class="muted">暂无流量记录（还没有客户端通过隧道访问这个{{if eq .PortLabel "站点数"}}客户端{{else}}站点{{end}}）。</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
+<script>
+(function () {
+  var card = document.getElementById('ports-card');
+  if (!card) return;
+  var peer = card.getAttribute('data-peer');
+  var body = document.getElementById('ports-body');
+  var age = document.getElementById('ports-age');
+  var timer = null;
+
+  function fmt(n) {
+    n = Number(n) || 0;
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GiB';
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MiB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return n + ' B';
+  }
+  function cell(text, cls) {
+    var td = document.createElement('td');
+    if (cls) td.className = cls;
+    td.textContent = text;
+    return td;
+  }
+  function emptyRow(text) {
+    var tr = document.createElement('tr');
+    var td = document.createElement('td');
+    td.colSpan = 7;
+    td.className = 'muted';
+    td.textContent = text;
+    tr.appendChild(td);
+    return tr;
+  }
+  function render(ports) {
+    body.textContent = '';
+    if (!ports || !ports.length) { body.appendChild(emptyRow('暂无流量记录。')); return; }
+    ports.forEach(function (p) {
+      var tr = document.createElement('tr');
+      tr.appendChild(cell(p.proto_name || ''));
+      tr.appendChild(cell(p.site_ip || '', 'mono'));
+      tr.appendChild(cell(p.port ? String(p.port) : '—', 'mono'));
+      tr.appendChild(cell(p.clients ? String(p.clients) : '—'));
+      tr.appendChild(cell(fmt(p.bps_to_site) + '/s / ' + fmt(p.bps_from_site) + '/s'));
+      tr.appendChild(cell(fmt(p.bytes_to_site) + ' / ' + fmt(p.bytes_from)));
+      tr.appendChild(cell(p.last_seen ? new Date(p.last_seen).toLocaleTimeString() : '—'));
+      body.appendChild(tr);
+    });
+  }
+  function tick() {
+    fetch('/api/ui/peer/' + encodeURIComponent(peer), { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d) { if (age) age.textContent = '读取失败（控制面连不上服务端）'; return; }
+        if (d.error) { if (age) age.textContent = d.error; return; }
+        render(d.ports);
+        if (age) age.textContent = '已刷新 ' + new Date().toLocaleTimeString();
+      })
+      .catch(function () { if (age) age.textContent = '读取失败'; });
+  }
+  function start() { if (!timer) { tick(); timer = setInterval(tick, 2000); } }
+  function stop() { if (timer) { clearInterval(timer); timer = null; } }
+  document.addEventListener('visibilitychange', function () { document.hidden ? stop() : start(); });
+  start();
+})();
+</script>
+{{end}}

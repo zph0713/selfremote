@@ -73,6 +73,12 @@ type session struct {
 type peerState struct {
 	cfg PeerConfig
 
+	// uid is a monotonic identifier assigned when the peer is installed. Flow
+	// accounting keys on it so a revoked-and-readded peer can never inherit
+	// another peer's flow rows (pointer identity is not safe: addresses get
+	// reused after GC).
+	uid uint64
+
 	addr *net.UDPAddr // gateway: learned from traffic; client: the server address
 
 	cur, prev    *session
@@ -111,6 +117,12 @@ type peerState struct {
 	// Stats.
 	bytesIn  uint64
 	bytesOut uint64
+	// Rate sampling (server/gateway status displays). Guarded by e.mu.
+	rateAt      time.Time
+	rateLastIn  uint64
+	rateLastOut uint64
+	bpsIn       float64
+	bpsOut      float64
 
 	// static marks peers from the static config (never touched by the
 	// registry reloader).
@@ -172,6 +184,11 @@ type Engine struct {
 	conflicts   []string
 	relay       relayCounters
 
+	// Server mode: per-flow port accounting (observability) and the uid
+	// allocator peers are stamped with.
+	flows   *flowTable
+	nextUID atomic.Uint64
+
 	// Agent mode: address translation, forwarding gate and announce timer.
 	translator   *Translator
 	forwarding   atomic.Bool
@@ -207,6 +224,7 @@ func New(opts Options) (*Engine, error) {
 		peers:     make(map[string]*peerState),
 		addr2peer: make(map[string]*peerState),
 		hsLimiter: newHSLimiter(),
+		flows:     newFlowTable(defaultFlowLimit),
 	}
 	if e.logf == nil {
 		e.logf = log.Printf

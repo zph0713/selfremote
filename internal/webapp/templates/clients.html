@@ -1,0 +1,51 @@
+{{define "content"}}
+<h1>客户端连接</h1>
+<p class="muted small">
+  这里列出<b>已注册的客户端设备</b>（每台一个密钥文件）。点设备名看它正在访问的站点端口与实时流量。
+  新增设备仍在「客户端密钥」页创建。
+  <a class="btn" href="/devices">管理客户端密钥</a>
+</p>
+
+{{if not .Data.HubReachable}}
+<div class="flash err">控制面读不到中转服务端（<code>SRV_API_URL</code> 未配置或服务端未运行）：状态与流量仅供参考。</div>
+{{end}}
+
+{{if .Data.Clients}}
+<table>
+  <tr>
+    <th>设备</th>
+    <th>状态</th>
+    <th>隧道地址</th>
+    <th>可访问站点</th>
+    <th>当前速率 ↓ / ↑</th>
+    <th>累计流量 ↓ / ↑</th>
+    <th>最近活跃</th>
+    <th></th>
+  </tr>
+  {{range .Data.Clients}}
+  <tr>
+    <td>
+      <a href="/clients/{{.ID}}">{{.Name}}</a>
+      <div class="muted small mono">{{.Username}}</div>
+    </td>
+    <td>
+      {{if eq .Live.State "在线"}}<span class="dot ok"></span>{{.Live.State}}
+      {{else if eq .Live.State "认证中"}}<span class="dot warn"></span>{{.Live.State}}
+      {{else if eq .Live.State "已停用"}}<span class="dot muted"></span>{{.Live.State}}
+      {{else}}<span class="dot muted"></span>{{.Live.State}}{{end}}
+    </td>
+    <td class="mono">{{if .TunnelIP}}{{.TunnelIP}}{{else}}<span class="muted">—</span>{{end}}</td>
+    <td class="small">
+      {{if .Sites}}{{range .Sites}}<span class="mono">{{.}}</span> {{end}}{{else}}<span class="muted">—</span>{{end}}
+    </td>
+    <td>{{human_bytes .Live.RxBps}}/s / {{human_bytes .Live.TxBps}}/s</td>
+    <td>{{human_bytes .Live.RxBytes}} / {{human_bytes .Live.TxBytes}}</td>
+    <td>{{since .Live.LastSeen}}</td>
+    <td><a class="btn" href="/clients/{{.ID}}">详情</a></td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p class="muted">还没有客户端设备。去「客户端密钥」页创建第一台：生成密钥文件 → 在客户端导入即可。</p>
+{{end}}
+{{end}}

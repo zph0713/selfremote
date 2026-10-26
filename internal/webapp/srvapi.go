@@ -27,12 +27,19 @@ type hubAgent struct {
 	LastRecv   string   `json:"last_recv,omitempty"`
 	RxBytes    uint64   `json:"rx_bytes"`
 	TxBytes    uint64   `json:"tx_bytes"`
+	RxBps      uint64   `json:"rx_bps"`
+	TxBps      uint64   `json:"tx_bps"`
 	Enabled    *bool    `json:"enabled,omitempty"`
 	TunnelIP   string   `json:"tunnel_ip,omitempty"`
 	Routes     []string `json:"routes,omitempty"`
 	AnnounceAt string   `json:"announce_at,omitempty"`
 	Mismatch   bool     `json:"config_mismatch,omitempty"`
 	Info       *hubInfo `json:"info,omitempty"`
+
+	// M5.1+: capability flags the agent reports in its announce frame (remote
+	// configuration, port policy, ...). Older agents simply omit them.
+	Caps      []string `json:"caps,omitempty"`
+	ConfigRev int64    `json:"config_rev,omitempty"`
 }
 
 // hubInfo is an agent's own announce payload.
@@ -134,10 +141,13 @@ type hubView struct {
 	Reachable bool
 	Status    *hubStatus
 	AgentByID map[string]hubAgent
+	// PeerByName indexes every peer by name: client devices are looked up by
+	// name (the clients registry carries no separate id yet).
+	PeerByName map[string]hubAgent
 }
 
 func (s *Server) hubView(ctx context.Context) hubView {
-	v := hubView{AgentByID: map[string]hubAgent{}}
+	v := hubView{AgentByID: map[string]hubAgent{}, PeerByName: map[string]hubAgent{}}
 	st, ok := s.hubStatus(ctx)
 	if !ok {
 		return v
@@ -145,6 +155,7 @@ func (s *Server) hubView(ctx context.Context) hubView {
 	v.Reachable = true
 	v.Status = st
 	for _, p := range st.Peers {
+		v.PeerByName[p.Name] = p
 		if p.Role == "agent" {
 			v.AgentByID[p.ID] = p
 		}
@@ -166,6 +177,8 @@ type liveAgentStatus struct {
 	LastSeen  string
 	RxBytes   uint64
 	TxBytes   uint64
+	RxBps     uint64
+	TxBps     uint64
 	Mismatch  bool
 	State     string // 在线 / 已停用 / 离线 / 未接入
 }
@@ -180,6 +193,8 @@ func agentState(a *Agent, live hubAgent, hubReachable bool, enabledInDB bool) li
 		LastSeen:  live.AnnounceAt,
 		RxBytes:   live.RxBytes,
 		TxBytes:   live.TxBytes,
+		RxBps:     live.RxBps,
+		TxBps:     live.TxBps,
 		Mismatch:  live.Mismatch,
 	}
 	if live.Info != nil {

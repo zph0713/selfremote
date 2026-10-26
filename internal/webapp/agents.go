@@ -256,6 +256,7 @@ func (s *Server) handleAgentShow(w http.ResponseWriter, r *http.Request, u *User
 	}
 	_, srvErr := s.hubPubKey()
 	codeValid := a.EnrollCode != "" && (a.EnrollExpires.IsZero() || time.Now().Before(a.EnrollExpires))
+	ports, portErr := s.hubPeerPorts(ctx, a.AgentID, 50)
 	s.render(w, r, "agent_show.html", pageData{
 		Title: "站点 " + a.Name,
 		Data: map[string]any{
@@ -275,6 +276,10 @@ func (s *Server) handleAgentShow(w http.ResponseWriter, r *http.Request, u *User
 			"WebBase":      "http://" + r.Host,
 			"RouteMode":    normalizeRouteMode(s.getSetting(ctx, routeModeKey, routeModeAuto)),
 			"InstallerOK":  s.installerReady(),
+			"Ports":        ports,
+			"PortsErr":     errText(portErr),
+			"PortPeer":     a.AgentID,
+			"PortLabel":    "客户端数",
 		},
 	})
 }

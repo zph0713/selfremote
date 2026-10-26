@@ -65,7 +65,8 @@
       <tr><td>运行时长</td><td>{{if .Data.Live.UptimeS}}{{.Data.Live.UptimeS}} 秒{{else}}<span class="muted">—</span>{{end}}</td></tr>
       <tr><td>来源地址</td><td class="mono">{{if .Data.Live.Remote}}{{.Data.Live.Remote}}{{else}}<span class="muted">—</span>{{end}}</td></tr>
       <tr><td>最后上报</td><td>{{since .Data.Live.LastSeen}}</td></tr>
-      <tr><td>流量 ↓ / ↑</td><td>{{human_bytes .Data.Live.RxBytes}} / {{human_bytes .Data.Live.TxBytes}}</td></tr>
+      <tr><td>当前速率 ↓ / ↑</td><td>{{human_bytes .Data.Live.RxBps}}/s / {{human_bytes .Data.Live.TxBps}}/s</td></tr>
+      <tr><td>累计流量 ↓ / ↑</td><td>{{human_bytes .Data.Live.RxBytes}} / {{human_bytes .Data.Live.TxBytes}}</td></tr>
     </table>
     <p>
       <form method="post" action="/agents/{{.Data.Agent.AgentID}}/kick" class="inline">
@@ -106,6 +107,9 @@
     </p>
   </div>
 </div>
+
+{{if .Data.PortsErr}}<div class="flash err">端口流量读取失败：{{.Data.PortsErr}}</div>{{end}}
+{{template "ports" .Data}}
 
 <div class="card">
   <details>

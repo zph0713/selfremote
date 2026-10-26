@@ -142,3 +142,87 @@ func TestAgentCommands(t *testing.T) {
 		t.Errorf("kick(unknown) = %d, want 404", code)
 	}
 }
+
+// TestObservabilityEndpoints covers the M5.0 API surface: the overview, the
+// per-peer port aggregate (empty until traffic flows) and the flow list. The
+// content of those rows is exercised end-to-end in the tunnel package
+// (TestHubRecordsPortFlows), which drives real relayed packets.
+func TestObservabilityEndpoints(t *testing.T) {
+	api, _ := newTestAPI(t)
+	h := api.Handler()
+
+	rec := get(t, h, "/api/v1/overview", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("overview = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var ov Overview
+	if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+		t.Fatal(err)
+	}
+	if ov.Status.Totals.AgentsTotal != 1 || ov.Status.Totals.ClientsTotal != 1 {
+		t.Errorf("overview totals = %+v", ov.Status.Totals)
+	}
+	if ov.FlowEntries != 0 || ov.FlowDropped != 0 {
+		t.Errorf("flow counters = (%d,%d), want zero before traffic", ov.FlowEntries, ov.FlowDropped)
+	}
+
+	// Clients endpoint lists the client peers only.
+	rec = get(t, h, "/api/v1/clients", "tok")
+	var cb struct {
+		Clients []tunnel.PeerStats `json:"clients"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cb); err != nil {
+		t.Fatal(err)
+	}
+	if len(cb.Clients) != 1 || cb.Clients[0].Name != "mac" {
+		t.Errorf("clients = %+v, want the mac device", cb.Clients)
+	}
+
+	// Known peer with no traffic: an empty (not missing) port list.
+	rec = get(t, h, "/api/v1/peers/home/ports", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ports(home) = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var pr PortsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.PeerID != "home" || pr.Ports == nil || len(pr.Ports) != 0 {
+		t.Errorf("ports(home) = %+v, want an empty list for a known peer", pr)
+	}
+	if rec := get(t, h, "/api/v1/peers/nope/ports", "tok"); rec.Code != http.StatusNotFound {
+		t.Errorf("ports(unknown) = %d, want 404", rec.Code)
+	}
+
+	// Flows endpoint is valid and empty.
+	rec = get(t, h, "/api/v1/flows", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("flows = %d", rec.Code)
+	}
+	var fr FlowsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &fr); err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.Flows) != 0 {
+		t.Errorf("flows = %d, want 0", len(fr.Flows))
+	}
+
+	// The bearer token is still required for all of them.
+	if rec := get(t, h, "/api/v1/overview", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("overview without token = %d, want 401", rec.Code)
+	}
+	if rec := get(t, h, "/api/v1/peers/home/ports", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ports without token = %d, want 401", rec.Code)
+	}
+}
+
+// TestSnapshotIsCached pins the 1 s cache: several open browser tabs must not
+// turn into several engine snapshots per second.
+func TestSnapshotIsCached(t *testing.T) {
+	api, _ := newTestAPI(t)
+	first := api.Snapshot()
+	second := api.Snapshot()
+	if first.UpdatedAt != second.UpdatedAt {
+		t.Errorf("snapshot not cached: %q != %q", first.UpdatedAt, second.UpdatedAt)
+	}
+}

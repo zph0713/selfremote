@@ -30,7 +30,8 @@
     <th>状态</th>
     <th>站点网段（对内呈现）</th>
     <th>隧道地址</th>
-    <th>流量 ↓ / ↑</th>
+    <th>当前速率 ↓ / ↑</th>
+    <th>累计流量 ↓ / ↑</th>
     <th>最后上报</th>
     <th></th>
   </tr>
@@ -50,6 +51,7 @@
     </td>
     <td class="mono">{{if .Routes}}{{range .Routes}}<div>{{.}}</div>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
     <td class="mono">{{.TunnelIP}}</td>
+    <td>{{human_bytes .Live.RxBps}}/s / {{human_bytes .Live.TxBps}}/s</td>
     <td>{{human_bytes .Live.RxBytes}} / {{human_bytes .Live.TxBytes}}</td>
     <td>{{since .Live.LastSeen}}</td>
     <td>

@@ -10,7 +10,7 @@ import (
 // semantics; registry peers are re-evaluated on every reload.
 // Caller holds e.mu.
 func (e *Engine) addPeerLocked(pc PeerConfig, static bool) {
-	p := &peerState{cfg: pc, static: static}
+	p := &peerState{cfg: pc, static: static, uid: e.nextUID.Add(1)}
 	// Peers that do not require MFA are usable immediately; MFA peers stay
 	// gated until a valid code arrives.
 	p.authed = !p.requiresMFA()

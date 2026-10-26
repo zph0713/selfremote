@@ -19,7 +19,9 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"selfremote/internal/tunnel"
@@ -36,10 +38,21 @@ type Config struct {
 // Server serves the control API.
 type Server struct {
 	cfg Config
+
+	// Snapshot cache: the web plane polls a couple of times per second per
+	// open page, and every Snapshot() call also advances the throughput
+	// samplers. One cached snapshot per second keeps both bounded no matter
+	// how many browsers are open.
+	mu       sync.Mutex
+	cached   Status
+	cachedAt time.Time
 }
 
 // New builds the API server.
 func New(cfg Config) *Server { return &Server{cfg: cfg} }
+
+// cacheTTL is how long a Status snapshot is reused.
+const cacheTTL = time.Second
 
 // Totals summarises the peer set.
 type Totals struct {
@@ -62,8 +75,20 @@ type Status struct {
 	UpdatedAt  string             `json:"updated_at"`
 }
 
-// Snapshot collects the current state.
+// Snapshot collects the current state (cached for cacheTTL).
 func (s *Server) Snapshot() Status {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.cachedAt.IsZero() && time.Since(s.cachedAt) < cacheTTL {
+		return s.cached
+	}
+	st := s.snapshotUncached()
+	s.cached, s.cachedAt = st, time.Now()
+	return st
+}
+
+// snapshotUncached builds a fresh snapshot from the engine.
+func (s *Server) snapshotUncached() Status {
 	peers := s.cfg.Engine.Stats()
 	st := Status{
 		Version:    s.cfg.Version,
@@ -91,6 +116,27 @@ func (s *Server) Snapshot() Status {
 	}
 	sort.Strings(st.Conflicts)
 	return st
+}
+
+// Overview is the /api/v1/overview payload: the status snapshot plus the flow
+// table's occupancy, which the list pages surface as a diagnostic.
+type Overview struct {
+	Status       Status `json:"status"`
+	FlowEntries  int    `json:"flow_entries"`
+	FlowDropped  uint64 `json:"flow_unaccounted"`
+	FlowCacheAge string `json:"snapshot_age,omitempty"`
+}
+
+// PortsResponse is the /api/v1/peers/{id}/ports payload.
+type PortsResponse struct {
+	PeerID string           `json:"peer_id"`
+	Ports  []tunnel.PortRow `json:"ports"`
+	Flows  int              `json:"flow_entries"`
+}
+
+// FlowsResponse is the /api/v1/flows payload.
+type FlowsResponse struct {
+	Flows []tunnel.FlowRow `json:"flows"`
 }
 
 // Handler builds the HTTP routes.
@@ -129,7 +175,53 @@ func (s *Server) Handler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}))
+	mux.HandleFunc("GET /api/v1/overview", s.authed(func(w http.ResponseWriter, r *http.Request) {
+		st := s.Snapshot()
+		entries, dropped := s.cfg.Engine.FlowStats()
+		writeJSON(w, http.StatusOK, Overview{Status: st, FlowEntries: entries, FlowDropped: dropped})
+	}))
+	mux.HandleFunc("GET /api/v1/clients", s.authed(func(w http.ResponseWriter, r *http.Request) {
+		st := s.Snapshot()
+		clients := make([]tunnel.PeerStats, 0, len(st.Peers))
+		for _, p := range st.Peers {
+			if p.Role != "agent" {
+				clients = append(clients, p)
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"clients": clients})
+	}))
+	mux.HandleFunc("GET /api/v1/peers/{id}/ports", s.authed(func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		ports := s.cfg.Engine.PeerPorts(id, queryInt(r, "limit", 50))
+		if ports == nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "peer 不存在"})
+			return
+		}
+		entries, _ := s.cfg.Engine.FlowStats()
+		writeJSON(w, http.StatusOK, PortsResponse{PeerID: id, Ports: ports, Flows: entries})
+	}))
+	mux.HandleFunc("GET /api/v1/flows", s.authed(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, FlowsResponse{
+			Flows: s.cfg.Engine.FlowSnapshot(queryInt(r, "limit", 100)),
+		})
+	}))
 	return logRequests(mux)
+}
+
+// queryInt reads a positive integer query parameter with a default.
+func queryInt(r *http.Request, name string, def int) int {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return def
+	}
+	if n > 1000 {
+		n = 1000
+	}
+	return n
 }
 
 // Run serves until ctx is cancelled.

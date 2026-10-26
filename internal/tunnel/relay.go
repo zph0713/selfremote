@@ -199,6 +199,9 @@ func (e *Engine) relayFromClient(p *peerState, pkt []byte, h *ipHeaderView) {
 	if e.sendTo(ag, pkt) {
 		e.relay.Forwarded.Add(1)
 		e.relay.ToAgents.Add(1)
+		// Observability: one map lookup, see flows.go. p is the client, ag the
+		// site agent; towards the site the destination is the service endpoint.
+		e.flows.observe(flowKeyFor(p, ag, pkt, h, true), true, len(pkt))
 	}
 }
 
@@ -232,6 +235,8 @@ func (e *Engine) relayFromAgent(p *peerState, pkt []byte, h *ipHeaderView) {
 	if e.sendTo(cl, pkt) {
 		e.relay.Forwarded.Add(1)
 		e.relay.ToClients.Add(1)
+		// Return direction: the service endpoint is the *source* of this packet.
+		e.flows.observe(flowKeyFor(cl, p, pkt, h, false), false, len(pkt))
 	}
 }
 

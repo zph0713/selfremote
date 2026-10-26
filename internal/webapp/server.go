@@ -20,7 +20,7 @@ import (
 var assets embed.FS
 
 // Version is the control-plane version (displayed in the UI).
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 // Config configures the control-plane server.
 type Config struct {
@@ -99,7 +99,10 @@ func (s *Server) parseTemplates() error {
 		"login.html", "register.html", "dashboard.html", "devices.html",
 		"device_new.html", "settings.html", "recovery.html", "users.html", "error.html",
 		"agents.html", "agent_new.html", "agent_show.html",
+		"clients.html", "client_show.html",
 	}
+	// Partials are parsed into every page so any template may {{template}} them.
+	partials := []string{"templates/_ports.html"}
 	funcs := template.FuncMap{
 		"human_bytes": humanBytes,
 		"since":       humanSince,
@@ -109,7 +112,9 @@ func (s *Server) parseTemplates() error {
 	}
 	s.pages = make(map[string]*template.Template, len(pages))
 	for _, p := range pages {
-		t, err := template.New("base").Funcs(funcs).ParseFS(assets, "templates/base.html", "templates/"+p)
+		files := append([]string{"templates/base.html"}, partials...)
+		files = append(files, "templates/"+p)
+		t, err := template.New("base").Funcs(funcs).ParseFS(assets, files...)
 		if err != nil {
 			return fmt.Errorf("template %s: %w", p, err)
 		}
@@ -164,6 +169,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /agents/{id}/package", s.authMFA(s.handleAgentPackage))
 	mux.HandleFunc("POST /agents/{id}/code", s.authMFA(s.handleAgentNewCode))
 	mux.HandleFunc("POST /agents/route-mode", s.authMFA(s.handleRouteMode))
+
+	mux.HandleFunc("GET /clients", s.authMFA(s.handleClients))
+	mux.HandleFunc("GET /clients/{id}", s.authMFA(s.handleClientShow))
+	mux.HandleFunc("GET /api/ui/overview", s.auth(s.handleUIOverview))
+	mux.HandleFunc("GET /api/ui/peer/{id}", s.auth(s.handleUIPeerPorts))
 
 	mux.HandleFunc("GET /users", s.authAdmin(s.handleUsers))
 	mux.HandleFunc("POST /users/new", s.authAdmin(s.handleUserCreate))

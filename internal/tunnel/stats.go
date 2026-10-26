@@ -20,6 +20,9 @@ type PeerStats struct {
 	LastRecv  string `json:"last_recv,omitempty"`
 	BytesIn   uint64 `json:"rx_bytes"`
 	BytesOut  uint64 `json:"tx_bytes"`
+	// BpsIn/BpsOut are the sampled throughput (bytes/second, EMA-smoothed).
+	BpsIn  uint64 `json:"rx_bps"`
+	BpsOut uint64 `json:"tx_bps"`
 
 	// Agent peers (server view).
 	Enabled    *bool      `json:"enabled,omitempty"`
@@ -37,8 +40,24 @@ type PeerStats struct {
 func (e *Engine) Stats() []PeerStats {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	now := time.Now()
 	out := make([]PeerStats, 0, len(e.peers))
 	for _, p := range e.peers {
+		// Throughput sampling: rates are derived here (not in the UI) and
+		// smoothed so a 1-2 s polling interval does not look jittery.
+		if p.rateAt.IsZero() {
+			p.rateAt, p.rateLastIn, p.rateLastOut = now, p.bytesIn, p.bytesOut
+		} else if dt := now.Sub(p.rateAt).Seconds(); dt >= 0.5 {
+			instIn := float64(p.bytesIn-p.rateLastIn) / dt
+			instOut := float64(p.bytesOut-p.rateLastOut) / dt
+			if p.rateLastIn == 0 && p.rateLastOut == 0 && p.bpsIn == 0 && p.bpsOut == 0 {
+				p.bpsIn, p.bpsOut = instIn, instOut
+			} else {
+				p.bpsIn = 0.5*p.bpsIn + 0.5*instIn
+				p.bpsOut = 0.5*p.bpsOut + 0.5*instOut
+			}
+			p.rateAt, p.rateLastIn, p.rateLastOut = now, p.bytesIn, p.bytesOut
+		}
 		st := PeerStats{
 			Name:        p.cfg.Name,
 			User:        p.cfg.User,
@@ -50,6 +69,8 @@ func (e *Engine) Stats() []PeerStats {
 			LastRecv:    fmtTime(p.lastRecv),
 			BytesIn:     p.bytesIn,
 			BytesOut:    p.bytesOut,
+			BpsIn:       uint64(p.bpsIn),
+			BpsOut:      uint64(p.bpsOut),
 			TunnelIP:    tunnelIPString(p.cfg.TunnelIP),
 			Routes:      p.cfg.AgentRouteStrings(),
 			AnnounceAt:  fmtTime(p.announceAt),
