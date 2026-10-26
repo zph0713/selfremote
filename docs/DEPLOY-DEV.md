@@ -18,6 +18,23 @@
 
 结论：容器、网络、卷、密钥、数据库、端口全部另起一套；生产栈不重启、不换镜像、不迁移数据。
 
+## 1.1 与旧版同机并行的两条硬规则
+
+旧版正在跑，新版必须**同时**满足这两条，否则会在运行时互相踩：
+
+1. **新版建议先不要起 `agent-home`（本机站点）**。在基础 compose 里它是 `host` 网络 +
+   `NET_ADMIN` + `/dev/net/tun`，会在宿主机上建 `sr0` 并对 `10.77.0.0/24` 写 iptables
+   MASQUERADE/FORWARD 规则——和旧版的本机站点用同一个网卡名与网段，规则会互相覆盖。
+   （如果走的是 desktop 覆盖，agent-home 被改成 bridge 网络、规则关在容器自己的 netns 里，
+   风险小很多；但为了少一个变量，第一轮仍然建议不起。）
+   → 起栈时显式只起四个服务：`db web nginx server`（见 §7）。
+   要在新版里验证「站点」功能，用**另一台 LAN 机器**做站点（新版网页生成安装码 → 那台机器装 agent）。
+2. **测试客户端用 `sr socks`，不要同时开两个 TUN**。两套 hub 的隧道地址都从 `10.77.0.2` 起，
+   同一台 Mac 同时连两个栈会抢同一个 TUN 地址/路由。`sr socks` 是用户态代理，不建 TUN、
+   不改路由，适合并行验证。
+
+> 旧版彻底下线之后（见 §13），这两条限制自动解除：那时可以起 agent-home，也可以正常用 TUN 客户端。
+
 ## 2. 前提
 
 - **另一台机器**（推荐）：Linux + Docker Engine + compose v2；Windows/macOS 的 Docker Desktop 也可以
@@ -74,12 +91,14 @@ cat data-dev/bootstrap-token      # 注册第一个管理员要用
 
 ## 7. 起栈
 
+**与旧版同机并行时，只起这四个服务**（不要 `agent-home`，原因见 §1.1）：
+
 ```sh
 cd deploy/stack
 docker compose -p selfremote-dev --env-file .env.dev \
   -f docker-compose.yml \
   -f docker-compose.desktop.yml \
-  -f docker-compose.dev.yml up -d
+  -f docker-compose.dev.yml up -d db web nginx server
 docker compose -p selfremote-dev ps
 ```
 
@@ -92,20 +111,38 @@ docker compose -p selfremote-dev ps
 - [ ] `/agents` 列表有「当前速率 ↓ / ↑」列
 - [ ] 站点详情出现「活跃端口与流量」表（无流量时是空表提示）
 - [ ] 管控 API 可用（在开发机上）：
-      `curl -s -H "Authorization: Bearer $(cat data-dev/api-token)" http://127.0.0.1:8771/api/v1/overview`
+      ```sh
+      TOKEN=$(cat data-dev/api-token)
+      curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8771/api/v1/overview
+      ```
 - [ ] 想看真实端口数据：用开发栈签发的 `.srkey` 跑 `sr socks` 连上，访问本机站点网段，
       然后刷新站点详情页（端口表每 2 秒自动刷新）
 
 ## 9. 确认没影响生产
 
+一条命令跑完全部隔离检查（只读，不启停容器）：
+
 ```sh
-docker ps --format '{{.Names}}' | grep selfremote          # 两套容器名各自带项目前缀
-docker volume ls | grep selfremote                         # 两套 db-data 卷
-ss -lunp | grep -E '28333|28334'                            # 端口各自监听
+bash scripts/check-dev-isolation.sh selfremote selfremote-dev
 ```
 
-生产栈（如果在同机）应保持：`selfremote-server-1` 等容器**没有重启时间变化**、
-镜像仍是 `ghcr.io/...:latest`、`deploy/stack/data` 目录未被改动。
+它检查五件事，任何一项 FAIL 就说明两套栈有共享：
+
+1. 容器名前缀是否独立（compose 项目隔离）
+2. 宿主发布端口是否重叠
+3. 新版是否有容器用了 `host` 网络（会占宿主端口/TUN/iptables）
+4. 新版镜像是否误用了 `ghcr.io/zph0713/selfremote:latest`
+5. 新版挂载的数据目录是否指向生产 `data`
+
+人工复核（可选）：
+
+```sh
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}' | grep -E 'selfremote'
+docker volume ls | grep selfremote
+ss -lunp 2>/dev/null | grep -E '28333|28334'    # 两套各自监听
+```
+
+生产栈应保持：容器**重启时间不变**、镜像仍是 `ghcr.io/...:latest`、`deploy/stack/data` 未被改动。
 
 ## 10. 收尾
 
@@ -142,3 +179,65 @@ rm -rf data-dev
 > 说明：这台 Mac 上 Docker 当前未运行，所以 `docker compose config` 没有实跑，
 > 只做了 YAML/Shell 静态校验。第一次在目标机器上跑如果报错，把 `docker compose ... up` 的
 > 输出贴回来即可定位。
+
+## 13. 新版跑通后：切换并下线旧版
+
+**前提**：新版验收通过——至少一台客户端（`sr socks` 或 TUN）和一个站点（另一台 LAN 机器）
+在新版上跑通，端口流量能在页面看到。
+
+### 13.1 先备份旧版（仓库外）
+
+```sh
+cd deploy/stack
+tar czf ~/selfremote-old-data-$(date +%F).tar.gz data/
+docker exec selfremote-db-1 mariadb-dump -usr -p"$DB_PASSWORD" selfremote > ~/selfremote-old-db-$(date +%F).sql
+```
+
+> 容器名以 `docker ps` 为准（`<项目名>-db-1`）。备份别放进仓库，避免误提交。
+
+### 13.2 停旧版（保留数据，不要 `-v`）
+
+```sh
+cd deploy/stack
+docker compose -p selfremote -f docker-compose.yml down
+```
+
+旧版用的是 `host` 网络，停掉后才会释放 28333/UDP 与 8080/28080。
+**这一步会中断生产服务几十秒到几分钟**，安排在没人用的时候做。
+
+### 13.3 新版二选一
+
+- **只在局域网用**：保持现在的 18080 / 28334 不动，直接开始逐台切换客户端。
+- **接管生产入口**（公网 IPv6 + 28333/UDP + 28080）：把新版按生产形态再起一遍——
+  server 改回 `host` 网络（去掉 desktop 覆盖）、`server.json` 的 `listen` 用 28333、
+  `api_listen` 用 `127.0.0.1:8770`。数据目录仍用 `data-dev`（独立），确认稳定后再谈迁移。
+
+### 13.4 客户端与站点重新接入
+
+新版 hub 是**新密钥**，旧 `.srkey` / 旧 agent 配置连不上（这是隔离的代价，也是安全的保证）：
+
+1. 新版网页「站点 Agent」→ 建站点 → 复制安装命令 → 在目标机器执行；
+2. 「客户端密钥」→ 建设备 → 下载 `.srkey` → 导入客户端（或走 M5.3 之后的注册码流程）；
+3. 一台一台切，旧版停着但数据仍在，出问题可以立刻回退。
+
+### 13.5 回退
+
+```sh
+# 停新版（保留 data-dev）
+docker compose -p selfremote-dev --env-file .env.dev -f docker-compose.yml -f docker-compose.desktop.yml down
+# 起旧版（数据和卷都还在）
+cd deploy/stack && docker compose -p selfremote -f docker-compose.yml up -d
+```
+
+两套栈**不能同时**占用 28333/8080/28080，所以回退一定是"先停新的、再起旧的"。
+
+### 13.6 确认稳定后再删旧版
+
+稳定运行 3–7 天后再执行（备份在手、新版可用）：
+
+```sh
+docker compose -p selfremote -f docker-compose.yml down -v
+rm -rf data/            # 旧密钥与注册表；先确认备份可用
+```
+
+删掉之后，新版可以正式接管端口与公网入口，`§1.1` 的两条并行限制也随之解除。
